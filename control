@@ -1,8 +1,9 @@
-Package: com.you.lsclock
+Package: com.hidoxd.lsclock
 Name: LSClock
-Version: 1.0
+Depends: mobilesubstrate (>= 0.9.5000)
+Version: 1.0.0
 Architecture: iphoneos-arm64
-Description: Lockscreen GIF Clock
-Maintainer: User
+Description: Anime GIF Clock for LockScreen
+Maintainer: hidoxd
+Author: hidoxd
 Section: Tweaks
-Depends: mobilesubstrate
