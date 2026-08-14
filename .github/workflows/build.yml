@@ -1,0 +1,22 @@
+name: Build Tweak
+on: [push]
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v2
+      - name: Install Theos
+        run: |
+          brew install ldid dpkg
+          git clone --recursive https://github.com/theos/theos.git ~/theos
+          cd ~/theos/sdks
+          curl -LO https://github.com/theos/sdks/raw/master/iPhoneOS16.5.sdk.tar.xz
+          tar -xf iPhoneOS16.5.sdk.tar.xz
+      - name: Build
+        run: |
+          cd $GITHUB_WORKSPACE
+          make clean package THEOS_PACKAGE_SCHEME=rootless FINALPACKAGE=1
+      - uses: actions/upload-artifact@v2
+        with:
+          name: LSClock.deb
+          path: packages/*.deb
