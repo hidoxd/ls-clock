@@ -10,12 +10,9 @@ jobs:
 
       - name: Install dependencies
         run: |
+         echo "deb http://archive.ubuntu.com/ubuntu/ jammy universe" | sudo tee -a /etc/apt/sources.list
           sudo apt-get update
-          sudo apt-get install -y build-essential fakeroot dpkg-dev perl git curl rsync xz-utils
-          curl -LO http://archive.ubuntu.com/ubuntu/pool/universe/n/ncurses/libtinfo5_6.3-2ubuntu0.1_amd64.deb
-          curl -LO http://archive.ubuntu.com/ubuntu/pool/universe/n/ncurses/libncurses5_6.3-2ubuntu0.1_amd64.deb
-          sudo dpkg -i libtinfo5_6.3-2ubuntu0.1_amd64.deb libncurses5_6.3-2ubuntu0.1_amd64.deb
-          rm libtinfo5_6.3-2ubuntu0.1_amd64.deb libncurses5_6.3-2ubuntu0.1_amd64.deb
+          sudo apt-get install -y build-essential fakeroot dpkg-dev perl git curl rsync xz-utils libtinfo5 libncurses5
 
       - name: Install ldid
         run: |
