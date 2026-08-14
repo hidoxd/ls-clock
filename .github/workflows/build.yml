@@ -2,15 +2,17 @@ name: Build Tweak
 on: [push]
 jobs:
   build:
-    runs-on: macos-latest
-    env:
-      THEOS: /Users/runner/theos
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential fakeroot dpkg-dev ldid curl
       - name: Install Theos
         run: |
-          brew install ldid dpkg
-          git clone --recursive https://github.com/theos/theos.git $THEOS
+          git clone --recursive https://github.com/theos/theos.git ~/theos
+          echo "THEOS=$HOME/theos" >> $GITHUB_ENV
       - name: Download SDK
         run: |
           cd $THEOS/sdks
