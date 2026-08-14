@@ -2,9 +2,12 @@
 #import <ImageIO/ImageIO.h>
 #import <rootless.h>
 
-// Функция нативного декодирования и анимации GIF через GPU (ImageIO)
-static UIImage *animatedGIFFromFile(NSString *path) {
-    NSData *data = [NSData dataWithContentsOfFile:path];
+// Безопасный фоновый декодер анимированных GIF через ImageIO
+static UIImage *loadAnimatedGIF(NSString *path) {
+    if (!path || ![[NSFileManager defaultManager] fileExistsAtPath:path]) {
+        return nil;
+    }
+    NSData *data = [NSData dataWithContentsOfFile:path options:NSDataReadingMappedIfSafe error:nil];
     if (!data) return nil;
 
     CGImageSourceRef source = CGImageSourceCreateWithData((__bridge CFDataRef)data, NULL);
@@ -13,42 +16,102 @@ static UIImage *animatedGIFFromFile(NSString *path) {
     size_t count = CGImageSourceGetCount(source);
     if (count <= 1) {
         CFRelease(source);
-        return [UIImage imageWithContentsOfFile:path];
+        return [UIImage imageWithData:data];
     }
 
     NSMutableArray *images = [NSMutableArray arrayWithCapacity:count];
     NSTimeInterval duration = 0.0;
 
     for (size_t i = 0; i < count; i++) {
-        CGImageRef image = CGImageSourceCreateImageAtIndex(source, i, NULL);
-        if (!image) continue;
+        CGImageRef cgImage = CGImageSourceCreateImageAtIndex(source, i, NULL);
+        if (!cgImage) continue;
 
         NSDictionary *properties = (__bridge_transfer NSDictionary *)CGImageSourceCopyPropertiesAtIndex(source, i, NULL);
-        NSDictionary *gifProperties = properties[(NSString *)kCGImagePropertyGIFDictionary];
-        NSNumber *delayTime = gifProperties[(NSString *)kCGImagePropertyGIFUnclampedDelayTime] ?: gifProperties[(NSString *)kCGImagePropertyGIFDelayTime];
-        duration += [delayTime doubleValue] > 0.0 ? [delayTime doubleValue] : 0.1;
+        NSDictionary *gifDict = properties[(NSString *)kCGImagePropertyGIFDictionary];
+        NSNumber *delayTime = gifDict[(NSString *)kCGImagePropertyGIFUnclampedDelayTime] ?: gifDict[(NSString *)kCGImagePropertyGIFDelayTime];
+        
+        double delay = [delayTime doubleValue];
+        if (delay <= 0.02) delay = 0.1;
+        duration += delay;
 
-        [images addObject:[UIImage imageWithCGImage:image]];
-        CGImageRelease(image);
+        [images addObject:[UIImage imageWithCGImage:cgImage]];
+        CGImageRelease(cgImage);
     }
     CFRelease(source);
 
-    if (duration == 0.0) duration = 0.1 * count;
+    if (duration <= 0.0) duration = 0.1 * count;
     return [UIImage animatedImageWithImages:images duration:duration];
 }
 
-// Нативный контейнер часов
+// Менеджер фоновой загрузки изображений
+@interface LSClockManager : NSObject
+@property (nonatomic, strong) NSMutableDictionary<NSString *, UIImage *> *imageCache;
+@property (nonatomic, assign) BOOL isLoaded;
++ (instancetype)sharedManager;
+- (void)preloadImagesAsync:(void(^)(void))completion;
+- (UIImage *)imageForName:(NSString *)name;
+@end
+
+@implementation LSClockManager
+
++ (instancetype)sharedManager {
+    static LSClockManager *shared = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        shared = [[self alloc] init];
+    });
+    return shared;
+}
+
+- (instancetype)init {
+    if (self = [super init]) {
+        _imageCache = [NSMutableDictionary dictionary];
+        _isLoaded = NO;
+        [self preloadImagesAsync:nil];
+    }
+    return self;
+}
+
+- (void)preloadImagesAsync:(void(^)(void))completion {
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSString *baseDir = ROOT_PATH_NS(@"/Library/Application Support/LSClock");
+        NSArray *names = @[@"0", @"1", @"2", @"3", @"4", @"5", @"6", @"7", @"8", @"9", @"colon"];
+        
+        NSMutableDictionary *tempDict = [NSMutableDictionary dictionary];
+        for (NSString *name in names) {
+            NSString *filePath = [baseDir stringByAppendingPathComponent:[NSString stringWithFormat:@"%@.gif", name]];
+            UIImage *img = loadAnimatedGIF(filePath);
+            if (img) {
+                tempDict[name] = img;
+            }
+        }
+
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self.imageCache addEntriesFromDictionary:tempDict];
+            self.isLoaded = YES;
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"LSClockImagesReadyNotification" object:nil];
+            if (completion) completion();
+        });
+    });
+}
+
+- (UIImage *)imageForName:(NSString *)name {
+    return self.imageCache[name];
+}
+
+@end
+
+// Нативный контейнер отображения часов
 @interface LSClockContainerView : UIView
-@property (nonatomic, retain) UIStackView *stackView;
-@property (nonatomic, retain) UIImageView *h1View;
-@property (nonatomic, retain) UIImageView *h2View;
-@property (nonatomic, retain) UIImageView *colonView;
-@property (nonatomic, retain) UIImageView *m1View;
-@property (nonatomic, retain) UIImageView *m2View;
-@property (nonatomic, retain) NSMutableDictionary<NSString *, UIImage *> *gifCache;
-@property (nonatomic, retain) NSTimer *timer;
-- (void)updateTime;
-- (UIImage *)gifNamed:(NSString *)name;
+@property (nonatomic, strong) UIStackView *stackView;
+@property (nonatomic, strong) UIImageView *h1View;
+@property (nonatomic, strong) UIImageView *h2View;
+@property (nonatomic, strong) UIImageView *colonView;
+@property (nonatomic, strong) UIImageView *m1View;
+@property (nonatomic, strong) UIImageView *m2View;
+@property (nonatomic, copy) NSString *lastTimeStr;
+@property (nonatomic, strong) NSTimer *updateTimer;
+- (void)updateClockDisplay;
 @end
 
 @implementation LSClockContainerView
@@ -56,109 +119,133 @@ static UIImage *animatedGIFFromFile(NSString *path) {
 - (instancetype)initWithFrame:(CGRect)frame {
     if (self = [super initWithFrame:frame]) {
         self.userInteractionEnabled = NO;
-        self.gifCache = [NSMutableDictionary dictionary];
+        self.clipsToBounds = YES;
+        self.backgroundColor = [UIColor clearColor];
 
-        // Горизонтальный стек для 5 элементов: [Ч][Ч]:[М][М]
-        self.stackView = [[UIStackView alloc] initWithFrame:self.bounds];
-        self.stackView.axis = UILayoutConstraintAxisHorizontal;
-        self.stackView.alignment = UIStackViewAlignmentCenter;
-        self.stackView.distribution = UIStackViewDistributionFillEqually;
-        self.stackView.spacing = 2;
-        self.stackView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-        [self addSubview:self.stackView];
+        _stackView = [[UIStackView alloc] initWithFrame:self.bounds];
+        _stackView.axis = UILayoutConstraintAxisHorizontal;
+        _stackView.alignment = UIStackViewAlignmentCenter;
+        _stackView.distribution = UIStackViewDistributionFillEqually;
+        _stackView.spacing = 2.0;
+        _stackView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+        [self addSubview:_stackView];
 
-        self.h1View = [self createDigitView];
-        self.h2View = [self createDigitView];
-        self.colonView = [self createDigitView];
-        self.m1View = [self createDigitView];
-        self.m2View = [self createDigitView];
+        _h1View = [self createImageView];
+        _h2View = [self createImageView];
+        _colonView = [self createImageView];
+        _m1View = [self createImageView];
+        _m2View = [self createImageView];
 
-        [self.stackView addArrangedSubview:self.h1View];
-        [self.stackView addArrangedSubview:self.h2View];
-        [self.stackView addArrangedSubview:self.colonView];
-        [self.stackView addArrangedSubview:self.m1View];
-        [self.stackView addArrangedSubview:self.m2View];
+        [_stackView addArrangedSubview:_h1View];
+        [_stackView addArrangedSubview:_h2View];
+        [_stackView addArrangedSubview:_colonView];
+        [_stackView addArrangedSubview:_m1View];
+        [_stackView addArrangedSubview:_m2View];
 
-        [self updateTime];
+        [[NSNotificationCenter defaultCenter] addObserver:self 
+                                                 selector:@selector(updateClockDisplay) 
+                                                     name:@"LSClockImagesReadyNotification" 
+                                                   object:nil];
 
-        // Таймер для обновления цифр каждую секунду
-        self.timer = [NSTimer scheduledTimerWithTimeInterval:1.0 target:self selector:@selector(updateTime) userInfo:nil repeats:YES];
-        [[NSRunLoop mainRunLoop] addTimer:self.timer forMode:NSRunLoopCommonModes];
+        [self updateClockDisplay];
+
+        __weak typeof(self) weakSelf = self;
+        _updateTimer = [NSTimer scheduledTimerWithTimeInterval:1.0 repeats:YES block:^(NSTimer * _Nonnull timer) {
+            [weakSelf updateClockDisplay];
+        }];
+        [[NSRunLoop mainRunLoop] addTimer:_updateTimer forMode:NSRunLoopCommonModes];
     }
     return self;
 }
 
-- (UIImageView *)createDigitView {
+- (UIImageView *)createImageView {
     UIImageView *iv = [[UIImageView alloc] init];
     iv.contentMode = UIViewContentModeScaleAspectFit;
+    iv.backgroundColor = [UIColor clearColor];
+    iv.clipsToBounds = YES;
     return iv;
 }
 
-- (UIImage *)gifNamed:(NSString *)name {
-    if (!name) return nil;
-    if (self.gifCache[name]) return self.gifCache[name];
-
-    NSString *baseDir = ROOT_PATH_NS(@"/Library/Application Support/LSClock");
-    NSString *path = [baseDir stringByAppendingPathComponent:[NSString stringWithFormat:@"%@.gif", name]];
-
-    UIImage *img = animatedGIFFromFile(path);
-    if (img) {
-        self.gifCache[name] = img;
+- (void)updateClockDisplay {
+    LSClockManager *mgr = [LSClockManager sharedManager];
+    if (!mgr.isLoaded && mgr.imageCache.count == 0) {
+        return;
     }
-    return img;
-}
 
-- (void)updateTime {
     NSDate *now = [NSDate date];
     NSCalendar *calendar = [NSCalendar currentCalendar];
     NSDateComponents *comps = [calendar components:(NSCalendarUnitHour | NSCalendarUnitMinute) fromDate:now];
 
-    NSString *timeStr = [NSString stringWithFormat:@"%02ld%02ld", (long)comps.hour, (long)comps.minute];
+    NSString *currentTimeStr = [NSString stringWithFormat:@"%02ld%02ld", (long)comps.hour, (long)comps.minute];
 
-    self.h1View.image = [self gifNamed:[timeStr substringWithRange:NSMakeRange(0, 1)]];
-    self.h2View.image = [self gifNamed:[timeStr substringWithRange:NSMakeRange(1, 1)]];
-    self.colonView.image = [self gifNamed:@"colon"];
-    self.m1View.image = [self gifNamed:[timeStr substringWithRange:NSMakeRange(2, 1)]];
-    self.m2View.image = [self gifNamed:[timeStr substringWithRange:NSMakeRange(3, 1)]];
+    if ([currentTimeStr isEqualToString:self.lastTimeStr] && self.colonView.image != nil) {
+        return;
+    }
+    self.lastTimeStr = currentTimeStr;
+
+    NSString *d0 = [currentTimeStr substringWithRange:NSMakeRange(0, 1)];
+    NSString *d1 = [currentTimeStr substringWithRange:NSMakeRange(1, 1)];
+    NSString *d2 = [currentTimeStr substringWithRange:NSMakeRange(2, 1)];
+    NSString *d3 = [currentTimeStr substringWithRange:NSMakeRange(3, 1)];
+
+    self.h1View.image = [mgr imageForName:d0];
+    self.h2View.image = [mgr imageForName:d1];
+    self.colonView.image = [mgr imageForName:@"colon"];
+    self.m1View.image = [mgr imageForName:d2];
+    self.m2View.image = [mgr imageForName:d3];
 }
 
 - (void)dealloc {
-    [self.timer invalidate];
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
+    [_updateTimer invalidate];
+    _updateTimer = nil;
 }
 
 @end
 
-// Хук системных часов экрана блокировки
+// Хук часов локскрина
 @interface SBFLockScreenDateView : UIView
-@property (nonatomic, retain) LSClockContainerView *lsClockContainer;
+@property (nonatomic, strong) LSClockContainerView *lsClockContainer;
 @end
 
 %hook SBFLockScreenDateView
 
-%property (nonatomic, retain) LSClockContainerView *lsClockContainer;
+%property (nonatomic, strong) LSClockContainerView *lsClockContainer;
 
 - (void)didMoveToWindow {
     %orig;
-    if (self.window && !self.lsClockContainer) {
-        self.lsClockContainer = [[LSClockContainerView alloc] initWithFrame:self.bounds];
-        [self addSubview:self.lsClockContainer];
+    if (self.window) {
+        if (!self.lsClockContainer) {
+            LSClockContainerView *container = [[LSClockContainerView alloc] initWithFrame:self.bounds];
+            self.lsClockContainer = container;
+            [self addSubview:container];
+        }
+        [self.lsClockContainer updateClockDisplay];
     }
 }
 
 - (void)layoutSubviews {
     %orig;
 
-    // Скрываем стандартные белые цифры системных часов
+    // Скрываем родные цифры через alpha без вызова рекурсии AutoLayout
     for (UIView *subview in self.subviews) {
         if (subview != self.lsClockContainer) {
-            subview.hidden = YES;
-            subview.alpha = 0.0;
+            if (subview.alpha != 0.0) {
+                subview.alpha = 0.0;
+            }
         }
     }
 
     if (self.lsClockContainer) {
-        self.lsClockContainer.frame = self.bounds;
+        if (!CGRectEqualToRect(self.lsClockContainer.frame, self.bounds)) {
+            self.lsClockContainer.frame = self.bounds;
+        }
     }
 }
 
 %end
+
+%ctor {
+    // Предварительный запуск фонового менеджера
+    [LSClockManager sharedManager];
+}
