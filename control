@@ -2,8 +2,7 @@ Package: com.you.lsclock
 Name: LSClock
 Version: 1.0
 Architecture: iphoneos-arm64
-Description: GIF Clock on LockScreen
-Maintainer: You
-Author: You
+Description: Lockscreen GIF Clock
+Maintainer: User
 Section: Tweaks
 Depends: mobilesubstrate
