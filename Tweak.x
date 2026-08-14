@@ -8,7 +8,7 @@
 - (void)reloadLSClockContent;
 @end
 
-// Встраиваем гифки прямо в HTML в формате Base64, чтобы обойти песочницу WebKit
+// Встраиваем гифки прямо в HTML в формате Base64, обходя песочницу WebKit
 static NSString *inlinedHTMLContent(NSString *htmlPath, NSString *baseDir) {
     NSError *error = nil;
     NSString *html = [NSString stringWithContentsOfFile:htmlPath encoding:NSUTF8StringEncoding error:&error];
@@ -36,7 +36,7 @@ static NSString *inlinedHTMLContent(NSString *htmlPath, NSString *baseDir) {
 - (void)layoutSubviews {
     %orig;
 
-    // 1. Скрываем только родные лейблы даты и времени внутри контейнера
+    // 1. Скрываем только родные системные лейблы даты и времени
     for (UIView *subview in self.subviews) {
         if (subview != self.lsClockWebView) {
             subview.hidden = YES;
@@ -44,12 +44,12 @@ static NSString *inlinedHTMLContent(NSString *htmlPath, NSString *baseDir) {
         }
     }
 
-    // 2. Инициализируем WebView при первом появлении
+    // 2. Инициализируем WebView при первом запуске
     if (!self.lsClockWebView) {
         [self setupLSClockWebView];
     }
 
-    // 3. Растягиваем WebView точно по размеру блока часов
+    // 3. Выставляем точный фрейм области часов
     if (self.lsClockWebView) {
         self.lsClockWebView.frame = self.bounds;
     }
@@ -58,7 +58,11 @@ static NSString *inlinedHTMLContent(NSString *htmlPath, NSString *baseDir) {
 %new
 - (void)setupLSClockWebView {
     WKWebViewConfiguration *config = [[WKWebViewConfiguration alloc] init];
-    config.preferences.javaScriptEnabled = YES;
+    
+    // Включаем поддержку JS через актуальный API iOS 14+
+    if (@available(iOS 14.0, *)) {
+        config.defaultWebpagePreferences.allowsContentJavaScript = YES;
+    }
 
     self.lsClockWebView = [[WKWebView alloc] initWithFrame:self.bounds configuration:config];
     self.lsClockWebView.opaque = NO;
