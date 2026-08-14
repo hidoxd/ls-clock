@@ -4,11 +4,10 @@
 
 @interface SBFLockScreenDateView : UIView
 @property (nonatomic, retain) WKWebView *lsClockWebView;
-- (void)setupLSClockWebView;
-- (void)reloadLSClockContent;
+- (void)setupLSClock;
 @end
 
-// Встраиваем гифки прямо в HTML в формате Base64, обходя песочницу WebKit
+// Вшиваем гифки в HTML через Base64, чтобы обойти песочницу WebKit
 static NSString *inlinedHTMLContent(NSString *htmlPath, NSString *baseDir) {
     NSError *error = nil;
     NSString *html = [NSString stringWithContentsOfFile:htmlPath encoding:NSUTF8StringEncoding error:&error];
@@ -33,10 +32,18 @@ static NSString *inlinedHTMLContent(NSString *htmlPath, NSString *baseDir) {
 
 %property (nonatomic, retain) WKWebView *lsClockWebView;
 
+// 1. Создаем WebView один раз при появлении вью на экране (без рекурсии и крашей)
+- (void)didMoveToWindow {
+    %orig;
+    if (self.window && !self.lsClockWebView) {
+        [self setupLSClock];
+    }
+}
+
+// 2. В layoutSubviews только скрываем родные цифры и задаем координаты
 - (void)layoutSubviews {
     %orig;
 
-    // 1. Скрываем только родные системные лейблы даты и времени
     for (UIView *subview in self.subviews) {
         if (subview != self.lsClockWebView) {
             subview.hidden = YES;
@@ -44,51 +51,40 @@ static NSString *inlinedHTMLContent(NSString *htmlPath, NSString *baseDir) {
         }
     }
 
-    // 2. Инициализируем WebView при первом запуске
-    if (!self.lsClockWebView) {
-        [self setupLSClockWebView];
-    }
-
-    // 3. Выставляем точный фрейм области часов
     if (self.lsClockWebView) {
         self.lsClockWebView.frame = self.bounds;
     }
 }
 
 %new
-- (void)setupLSClockWebView {
+- (void)setupLSClock {
+    if (self.lsClockWebView) return;
+
     WKWebViewConfiguration *config = [[WKWebViewConfiguration alloc] init];
-    
-    // Включаем поддержку JS через актуальный API iOS 14+
     if (@available(iOS 14.0, *)) {
         config.defaultWebpagePreferences.allowsContentJavaScript = YES;
     }
 
-    self.lsClockWebView = [[WKWebView alloc] initWithFrame:self.bounds configuration:config];
-    self.lsClockWebView.opaque = NO;
-    self.lsClockWebView.backgroundColor = [UIColor clearColor];
-    self.lsClockWebView.scrollView.backgroundColor = [UIColor clearColor];
-    self.lsClockWebView.scrollView.scrollEnabled = NO;
-    self.lsClockWebView.scrollView.bounces = NO;
-    self.lsClockWebView.userInteractionEnabled = NO;
-    self.lsClockWebView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    WKWebView *webView = [[WKWebView alloc] initWithFrame:self.bounds configuration:config];
+    webView.opaque = NO;
+    webView.backgroundColor = [UIColor clearColor];
+    webView.scrollView.backgroundColor = [UIColor clearColor];
+    webView.scrollView.scrollEnabled = NO;
+    webView.scrollView.bounces = NO;
+    webView.userInteractionEnabled = NO;
+    webView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
 
-    [self addSubview:self.lsClockWebView];
-    [self reloadLSClockContent];
-}
+    self.lsClockWebView = webView;
+    [self addSubview:webView];
 
-%new
-- (void)reloadLSClockContent {
     NSString *htmlPath = ROOT_PATH_NS(@"/Library/Application Support/LSClock/index.html");
     NSString *baseDir = ROOT_PATH_NS(@"/Library/Application Support/LSClock");
 
-    if (![[NSFileManager defaultManager] fileExistsAtPath:htmlPath]) {
-        return;
-    }
-
-    NSString *inlinedHTML = inlinedHTMLContent(htmlPath, baseDir);
-    if (inlinedHTML) {
-        [self.lsClockWebView loadHTMLString:inlinedHTML baseURL:nil];
+    if ([[NSFileManager defaultManager] fileExistsAtPath:htmlPath]) {
+        NSString *inlinedHTML = inlinedHTMLContent(htmlPath, baseDir);
+        if (inlinedHTML) {
+            [webView loadHTMLString:inlinedHTML baseURL:nil];
+        }
     }
 }
 
