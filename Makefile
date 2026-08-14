@@ -7,7 +7,7 @@ include $(THEOS)/makefiles/common.mk
 TWEAK_NAME = LSClock
 
 LSClock_FILES = Tweak.x
-LSClock_CFLAGS = -fobjc-arc
+LSClock_CFLAGS = -fobjc-arc -Wno-deprecated-declarations -Wno-error
 LSClock_FRAMEWORKS = UIKit WebKit CoreGraphics Foundation
 
 include $(THEOS_MAKE_PATH)/tweak.mk
