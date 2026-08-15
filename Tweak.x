@@ -1,26 +1,93 @@
 #import "Tweak.h"
 
 static LSClockPreferences gPrefs;
-// __weak предотвращает краш при обращении к деаллоцированному экземпляру часов
 static __weak LSClockContainerView *gActiveClockView = nil;
+static NSMutableDictionary<NSString *, UIImage *> *sGifImageCache = nil;
+
+// MARK: - Высокоэффективный загрузчик анимированных GIF (ImageIO)
+static UIImage *LSGetAnimatedGIF(NSString *name) {
+    if (!sGifImageCache) {
+        sGifImageCache = [[NSMutableDictionary alloc] init];
+    }
+    
+    if (sGifImageCache[name]) {
+        return sGifImageCache[name];
+    }
+    
+    NSString *filePath = [GIF_BUNDLE_PATH stringByAppendingPathComponent:[NSString stringWithFormat:@"%@.gif", name]];
+    if (![[NSFileManager defaultManager] fileExistsAtPath:filePath]) {
+        return nil;
+    }
+    
+    NSURL *fileURL = [NSURL fileURLWithPath:filePath];
+    CGImageSourceRef source = CGImageSourceCreateWithURL((__bridge CFURLRef)fileURL, NULL);
+    if (!source) return nil;
+    
+    size_t count = CGImageSourceGetCount(source);
+    UIImage *animatedImage = nil;
+    
+    if (count <= 1) {
+        CGImageRef imageRef = CGImageSourceCreateImageAtIndex(source, 0, NULL);
+        if (imageRef) {
+            animatedImage = [UIImage imageWithCGImage:imageRef scale:[UIScreen mainScreen].scale orientation:UIImageOrientationUp];
+            CGImageRelease(imageRef);
+        }
+    } else {
+        NSMutableArray *images = [NSMutableArray arrayWithCapacity:count];
+        NSTimeInterval totalDuration = 0.0;
+        
+        for (size_t i = 0; i < count; i++) {
+            CGImageRef imageRef = CGImageSourceCreateImageAtIndex(source, i, NULL);
+            if (!imageRef) continue;
+            
+            [images addObject:[UIImage imageWithCGImage:imageRef scale:[UIScreen mainScreen].scale orientation:UIImageOrientationUp]];
+            CGImageRelease(imageRef);
+            
+            // Вычисление длительности каждого кадра
+            NSTimeInterval frameDuration = 0.1;
+            CFDictionaryRef properties = CGImageSourceCopyPropertiesAtIndex(source, i, NULL);
+            if (properties) {
+                CFDictionaryRef gifProps = CFDictionaryGetValue(properties, kCGImagePropertyGIFDictionary);
+                if (gifProps) {
+                    NSNumber *unclampedDelay = CFDictionaryGetValue(gifProps, kCGImagePropertyGIFUnclampedDelayTime);
+                    NSNumber *delay = CFDictionaryGetValue(gifProps, kCGImagePropertyGIFDelayTime);
+                    if (unclampedDelay && [unclampedDelay doubleValue] > 0.0) {
+                        frameDuration = [unclampedDelay doubleValue];
+                    } else if (delay && [delay doubleValue] > 0.0) {
+                        frameDuration = [delay doubleValue];
+                    }
+                }
+                CFRelease(properties);
+            }
+            if (frameDuration < 0.02) frameDuration = 0.1;
+            totalDuration += frameDuration;
+        }
+        
+        animatedImage = [UIImage animatedImageWithImages:images duration:totalDuration];
+    }
+    
+    CFRelease(source);
+    
+    if (animatedImage) {
+        sGifImageCache[name] = animatedImage;
+    }
+    return animatedImage;
+}
 
 // MARK: - Загрузка настроек
 static void LoadPreferences(void) {
     @autoreleasepool {
         NSDictionary *dict = [NSDictionary dictionaryWithContentsOfFile:PREF_PATH];
         
-        // Дефолтные безопасные значения
         gPrefs.enabled = dict[@"enabled"] ? [dict[@"enabled"] boolValue] : YES;
         gPrefs.showSeconds = dict[@"showSeconds"] ? [dict[@"showSeconds"] boolValue] : YES;
-        gPrefs.customDateFormatEnabled = dict[@"customDateFormatEnabled"] ? [dict[@"customDateFormatEnabled"] boolValue] : YES;
-        gPrefs.hideOriginalClock = dict[@"hideOriginalClock"] ? [dict[@"hideOriginalClock"] boolValue] : YES;
+        gPrefs.showDate = dict[@"showDate"] ? [dict[@"showDate"] boolValue] : YES;
         gPrefs.showBattery = dict[@"showBattery"] ? [dict[@"showBattery"] boolValue] : YES;
+        gPrefs.digitHeight = dict[@"digitHeight"] ? [dict[@"digitHeight"] floatValue] : 72.0f;
+        gPrefs.digitSpacing = dict[@"digitSpacing"] ? [dict[@"digitSpacing"] floatValue] : 4.0f;
         
-        NSInteger alignVal = dict[@"alignment"] ? [dict[@"alignment"] integerValue] : 1; // 0: Left, 1: Center, 2: Right
-        gPrefs.alignment = (alignVal == 0) ? NSTextAlignmentLeft : ((alignVal == 2) ? NSTextAlignmentRight : NSTextAlignmentCenter);
-        
-        gPrefs.timeFontSize = dict[@"timeFontSize"] ? [dict[@"timeFontSize"] floatValue] : 68.0f;
-        gPrefs.dateFontSize = dict[@"dateFontSize"] ? [dict[@"dateFontSize"] floatValue] : 17.0f;
+        // Очистка кэша картинок при смене темы/настроек
+        [sGifImageCache removeAllObjects];
         
         LS_EXECUTE_ON_MAIN_THREAD(^{
             if (gActiveClockView) {
@@ -35,7 +102,7 @@ static void PreferencesChangedCallback(CFNotificationCenterRef center, void *obs
     LoadPreferences();
 }
 
-// MARK: - Контейнер кастомных часов
+// MARK: - Контейнер GIF-часов
 @implementation LSClockContainerView
 
 - (instancetype)initWithFrame:(CGRect)frame {
@@ -46,28 +113,30 @@ static void PreferencesChangedCallback(CFNotificationCenterRef center, void *obs
         self.backgroundColor = [UIColor clearColor];
         self.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
         
-        // Лейбл времени
-        _timeLabel = [[UILabel alloc] initWithFrame:CGRectZero];
-        _timeLabel.textColor = [UIColor whiteColor];
-        _timeLabel.layer.shadowColor = [UIColor blackColor].CGColor;
-        _timeLabel.layer.shadowOffset = CGSizeMake(0, 1.5);
-        _timeLabel.layer.shadowRadius = 3.0f;
-        _timeLabel.layer.shadowOpacity = 0.35f;
-        [self addSubview:_timeLabel];
+        _digitImageViews = [[NSMutableArray alloc] init];
+        _lastTimeString = @"";
         
-        // Лейбл даты
+        // Контейнер для цифр
+        _digitsContainerView = [[UIView alloc] initWithFrame:CGRectZero];
+        _digitsContainerView.backgroundColor = [UIColor clearColor];
+        [self addSubview:_digitsContainerView];
+        
+        // Дата
         _dateLabel = [[UILabel alloc] initWithFrame:CGRectZero];
         _dateLabel.textColor = [[UIColor whiteColor] colorWithAlphaComponent:0.9f];
+        _dateLabel.font = [UIFont systemFontOfSize:17.0 weight:UIFontWeightMedium];
+        _dateLabel.textAlignment = NSTextAlignmentCenter;
         _dateLabel.layer.shadowColor = [UIColor blackColor].CGColor;
         _dateLabel.layer.shadowOffset = CGSizeMake(0, 1.0);
         _dateLabel.layer.shadowRadius = 2.0f;
-        _dateLabel.layer.shadowOpacity = 0.30f;
+        _dateLabel.layer.shadowOpacity = 0.35f;
         [self addSubview:_dateLabel];
         
-        // Лейбл батареи
+        // Батарея
         _batteryLabel = [[UILabel alloc] initWithFrame:CGRectZero];
         _batteryLabel.textColor = [[UIColor whiteColor] colorWithAlphaComponent:0.8f];
         _batteryLabel.font = [UIFont systemFontOfSize:13.0 weight:UIFontWeightMedium];
+        _batteryLabel.textAlignment = NSTextAlignmentCenter;
         [self addSubview:_batteryLabel];
         
         [self applyConfiguration];
@@ -77,56 +146,75 @@ static void PreferencesChangedCallback(CFNotificationCenterRef center, void *obs
     return self;
 }
 
+- (void)applyConfiguration {
+    self.hidden = !gPrefs.enabled;
+    self.dateLabel.hidden = !gPrefs.showDate;
+    self.batteryLabel.hidden = !gPrefs.showBattery;
+    [self setNeedsLayout];
+}
+
 - (void)layoutSubviews {
     [super layoutSubviews];
     
     CGRect bounds = [self bounds];
     if (CGRectIsEmpty(bounds)) return;
     
-    CGFloat padding = 16.0f;
-    CGFloat contentWidth = bounds.size.width - (padding * 2.0f);
-    if (contentWidth <= 0) return;
+    CGFloat availableWidth = bounds.size.width;
+    CGFloat digitH = gPrefs.digitHeight;
+    CGFloat spacing = gPrefs.digitSpacing;
+    NSUInteger count = self.digitImageViews.count;
     
-    CGFloat currentY = 0.0f;
+    if (count == 0) return;
     
-    // Расчет фрейма времени
-    CGSize timeSize = [self.timeLabel sizeThatFits:CGSizeMake(contentWidth, CGFLOAT_MAX)];
-    self.timeLabel.frame = CGRectMake(padding, currentY, contentWidth, timeSize.height);
-    currentY += timeSize.height + 2.0f;
+    // Расчет ширины каждой гифки на основе пропорций аспекта
+    CGFloat totalDigitsWidth = 0.0f;
+    NSMutableArray<NSNumber *> *widths = [NSMutableArray arrayWithCapacity:count];
     
-    // Расчет фрейма даты
-    if (self.dateLabel.text.length > 0) {
-        CGSize dateSize = [self.dateLabel sizeThatFits:CGSizeMake(contentWidth, CGFLOAT_MAX)];
-        self.dateLabel.frame = CGRectMake(padding, currentY, contentWidth, dateSize.height);
+    for (NSUInteger i = 0; i < count; i++) {
+        UIImageView *iv = self.digitImageViews[i];
+        UIImage *img = iv.image;
+        CGFloat w = digitH * 0.65f; // стандартная пропорция по умолчанию
+        if (img && img.size.height > 0) {
+            w = digitH * (img.size.width / img.size.height);
+        }
+        [widths addObject:@(w)];
+        totalDigitsWidth += w;
+    }
+    totalDigitsWidth += (count - 1) * spacing;
+    
+    // Центрирование контейнера цифр
+    CGFloat startX = (availableWidth - totalDigitsWidth) / 2.0f;
+    self.digitsContainerView.frame = CGRectMake(startX, 0, totalDigitsWidth, digitH);
+    
+    CGFloat curX = 0.0f;
+    for (NSUInteger i = 0; i < count; i++) {
+        CGFloat w = [widths[i] floatValue];
+        UIImageView *iv = self.digitImageViews[i];
+        iv.frame = CGRectMake(curX, 0, w, digitH);
+        curX += w + spacing;
+    }
+    
+    CGFloat currentY = digitH + 6.0f;
+    
+    // Лейаут даты
+    if (gPrefs.showDate && self.dateLabel.text.length > 0) {
+        CGSize dateSize = [self.dateLabel sizeThatFits:CGSizeMake(availableWidth - 32, CGFLOAT_MAX)];
+        self.dateLabel.frame = CGRectMake(16, currentY, availableWidth - 32, dateSize.height);
         currentY += dateSize.height + 4.0f;
     }
     
-    // Расчет фрейма батареи
+    // Лейаут батареи
     if (gPrefs.showBattery && self.batteryLabel.text.length > 0) {
-        CGSize batSize = [self.batteryLabel sizeThatFits:CGSizeMake(contentWidth, CGFLOAT_MAX)];
-        self.batteryLabel.frame = CGRectMake(padding, currentY, contentWidth, batSize.height);
+        CGSize batSize = [self.batteryLabel sizeThatFits:CGSizeMake(availableWidth - 32, CGFLOAT_MAX)];
+        self.batteryLabel.frame = CGRectMake(16, currentY, availableWidth - 32, batSize.height);
     }
-}
-
-- (void)applyConfiguration {
-    self.timeLabel.textAlignment = gPrefs.alignment;
-    self.dateLabel.textAlignment = gPrefs.alignment;
-    self.batteryLabel.textAlignment = gPrefs.alignment;
-    
-    // Моноширинные цифры исключают дрожание текста при смене секунд
-    self.timeLabel.font = [UIFont monospacedDigitSystemFontOfSize:gPrefs.timeFontSize weight:UIFontWeightBold];
-    self.dateLabel.font = [UIFont systemFontOfSize:gPrefs.dateFontSize weight:UIFontWeightMedium];
-    
-    self.batteryLabel.hidden = !gPrefs.showBattery;
-    self.hidden = !gPrefs.enabled;
-    [self setNeedsLayout];
 }
 
 - (void)startTimer {
     [self stopTimer];
     if (!gPrefs.enabled) return;
     
-    NSTimeInterval interval = gPrefs.showSeconds ? 1.0 : 60.0;
+    NSTimeInterval interval = gPrefs.showSeconds ? 1.0 : 30.0;
     __weak typeof(self) weakSelf = self;
     
     self.timer = [NSTimer timerWithTimeInterval:interval repeats:YES block:^(NSTimer * _Nonnull timer) {
@@ -135,8 +223,6 @@ static void PreferencesChangedCallback(CFNotificationCenterRef center, void *obs
             [strongSelf updateClock];
         }
     }];
-    
-    // Регистрация в общем режиме RunLoop для непрерывного тика при скролле
     [[NSRunLoop mainRunLoop] addTimer:self.timer forMode:NSRunLoopCommonModes];
 }
 
@@ -152,7 +238,7 @@ static void PreferencesChangedCallback(CFNotificationCenterRef center, void *obs
     
     NSDate *now = [NSDate date];
     
-    // Кэширование форматтеров снижает нагрузку на CPU
+    // Форматирование времени в строку (например "12:48:05" или "12:48")
     static NSDateFormatter *sTimeFormatter = nil;
     static NSDateFormatter *sDateFormatter = nil;
     static dispatch_once_t sOnceToken;
@@ -163,29 +249,67 @@ static void PreferencesChangedCallback(CFNotificationCenterRef center, void *obs
     
     [sTimeFormatter setLocale:[NSLocale currentLocale]];
     [sTimeFormatter setDateFormat:gPrefs.showSeconds ? @"HH:mm:ss" : @"HH:mm"];
-    self.timeLabel.text = [sTimeFormatter stringFromDate:now];
+    NSString *timeStr = [sTimeFormatter stringFromDate:now];
     
-    [sDateFormatter setLocale:[NSLocale currentLocale]];
-    [sDateFormatter setDateFormat:gPrefs.customDateFormatEnabled ? @"EEEE, d MMMM" : @"d MMMM"];
-    self.dateLabel.text = [[sDateFormatter stringFromDate:now] capitalizedString];
+    // Обновляем гифки только если строка времени изменилась
+    if (![timeStr isEqualToString:self.lastTimeString] || self.digitImageViews.count != timeStr.length) {
+        self.lastTimeString = timeStr;
+        NSUInteger len = timeStr.length;
+        
+        // Синхронизация количества UIImageView с количеством символов
+        while (self.digitImageViews.count < len) {
+            UIImageView *iv = [[UIImageView alloc] init];
+            iv.contentMode = UIViewContentModeScaleAspectFit;
+            [self.digitsContainerView addSubview:iv];
+            [self.digitImageViews addObject:iv];
+        }
+        while (self.digitImageViews.count > len) {
+            UIImageView *iv = [self.digitImageViews lastObject];
+            [iv removeFromSuperview];
+            [self.digitImageViews removeLastObject];
+        }
+        
+        // Установка нужной GIF-картинки для каждого символа
+        for (NSUInteger i = 0; i < len; i++) {
+            unichar c = [timeStr characterAtIndex:i];
+            NSString *resourceName = nil;
+            if (c == ':') {
+                resourceName = @"colon";
+            } else if (c >= '0' && c <= '9') {
+                resourceName = [NSString stringWithFormat:@"%C", c];
+            } else {
+                resourceName = @"space";
+            }
+            
+            UIImage *targetImage = LSGetAnimatedGIF(resourceName);
+            UIImageView *iv = self.digitImageViews[i];
+            
+            // ВАЖНО: Присваиваем image только если он изменился, чтобы не сбрасывать цикл GIF-анимации!
+            if (iv.image != targetImage) {
+                iv.image = targetImage;
+            }
+        }
+        [self setNeedsLayout];
+    }
     
+    // Обновление даты
+    if (gPrefs.showDate) {
+        [sDateFormatter setLocale:[NSLocale currentLocale]];
+        [sDateFormatter setDateFormat:@"EEEE, d MMMM"];
+        self.dateLabel.text = [[sDateFormatter stringFromDate:now] capitalizedString];
+    }
+    
+    // Обновление батареи
     if (gPrefs.showBattery) {
         [UIDevice currentDevice].batteryMonitoringEnabled = YES;
         float batLevel = [UIDevice currentDevice].batteryLevel;
         UIDeviceBatteryState state = [UIDevice currentDevice].batteryState;
-        
-        if (batLevel < 0.0f) {
-            self.batteryLabel.text = @"";
-        } else {
+        if (batLevel >= 0.0f) {
             NSInteger batPercent = (NSInteger)roundf(batLevel * 100.0f);
             NSString *stateGlyph = (state == UIDeviceBatteryStateCharging || state == UIDeviceBatteryStateFull) ? @" ⚡︎" : @"";
             self.batteryLabel.text = [NSString stringWithFormat:@"%ld%%%@", (long)batPercent, stateGlyph];
         }
-    } else {
-        self.batteryLabel.text = @"";
     }
-    
-    [self setNeedsLayout];
 }
 
 - (void)dealloc {
@@ -200,10 +324,8 @@ static void PreferencesChangedCallback(CFNotificationCenterRef center, void *obs
 
 - (void)layoutSubviews {
     %orig;
-    
     if (!self) return;
     
-    // Явное приведение self к UIView исключает ошибку компиляции dot-синтаксиса
     UIView *selfView = (UIView *)self;
     
     if (!gPrefs.enabled) {
@@ -217,11 +339,10 @@ static void PreferencesChangedCallback(CFNotificationCenterRef center, void *obs
         return;
     }
     
-    if (gPrefs.hideOriginalClock) {
-        for (UIView *subview in [selfView subviews]) {
-            if (subview.tag != LSCLOCK_VIEW_TAG) {
-                subview.alpha = 0.0f;
-            }
+    // Скрываем нативные часы
+    for (UIView *subview in [selfView subviews]) {
+        if (subview.tag != LSCLOCK_VIEW_TAG) {
+            subview.alpha = 0.0f;
         }
     }
     
@@ -253,7 +374,7 @@ static void PreferencesChangedCallback(CFNotificationCenterRef center, void *obs
 
 %end
 
-// MARK: - Управление состоянием экрана (AOD / LockScreen)
+// MARK: - Управление состоянием экрана
 %hook CSCoverSheetViewController
 
 - (void)viewWillAppear:(BOOL)animated {
@@ -281,7 +402,7 @@ static void PreferencesChangedCallback(CFNotificationCenterRef center, void *obs
 
 %end
 
-// MARK: - Инициализация твика
+// MARK: - Конструктор
 %ctor {
     @autoreleasepool {
         LoadPreferences();
