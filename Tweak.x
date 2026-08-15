@@ -1,14 +1,15 @@
 #import "Tweak.h"
 
 static LSClockPreferences gPrefs;
-static LSClockContainerView *gActiveClockView = nil;
+// __weak предотвращает краш при обращении к деаллоцированному экземпляру часов
+static __weak LSClockContainerView *gActiveClockView = nil;
 
 // MARK: - Загрузка настроек
 static void LoadPreferences(void) {
     @autoreleasepool {
         NSDictionary *dict = [NSDictionary dictionaryWithContentsOfFile:PREF_PATH];
         
-        // Дефолтные значения (детерминированный фоллбек)
+        // Дефолтные безопасные значения
         gPrefs.enabled = dict[@"enabled"] ? [dict[@"enabled"] boolValue] : YES;
         gPrefs.showSeconds = dict[@"showSeconds"] ? [dict[@"showSeconds"] boolValue] : YES;
         gPrefs.customDateFormatEnabled = dict[@"customDateFormatEnabled"] ? [dict[@"customDateFormatEnabled"] boolValue] : YES;
@@ -34,7 +35,7 @@ static void PreferencesChangedCallback(CFNotificationCenterRef center, void *obs
     LoadPreferences();
 }
 
-// MARK: - Реализация LSClockContainerView
+// MARK: - Контейнер кастомных часов
 @implementation LSClockContainerView
 
 - (instancetype)initWithFrame:(CGRect)frame {
@@ -45,9 +46,8 @@ static void PreferencesChangedCallback(CFNotificationCenterRef center, void *obs
         self.backgroundColor = [UIColor clearColor];
         self.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
         
-        // Метка Времени
-        _timeLabel = [[UILabel alloc] init];
-        _timeLabel.translatesAutoresizingMaskIntoConstraints = NO;
+        // Лейбл времени
+        _timeLabel = [[UILabel alloc] initWithFrame:CGRectZero];
         _timeLabel.textColor = [UIColor whiteColor];
         _timeLabel.layer.shadowColor = [UIColor blackColor].CGColor;
         _timeLabel.layer.shadowOffset = CGSizeMake(0, 1.5);
@@ -55,9 +55,8 @@ static void PreferencesChangedCallback(CFNotificationCenterRef center, void *obs
         _timeLabel.layer.shadowOpacity = 0.35f;
         [self addSubview:_timeLabel];
         
-        // Метка Даты
-        _dateLabel = [[UILabel alloc] init];
-        _dateLabel.translatesAutoresizingMaskIntoConstraints = NO;
+        // Лейбл даты
+        _dateLabel = [[UILabel alloc] initWithFrame:CGRectZero];
         _dateLabel.textColor = [[UIColor whiteColor] colorWithAlphaComponent:0.9f];
         _dateLabel.layer.shadowColor = [UIColor blackColor].CGColor;
         _dateLabel.layer.shadowOffset = CGSizeMake(0, 1.0);
@@ -65,28 +64,11 @@ static void PreferencesChangedCallback(CFNotificationCenterRef center, void *obs
         _dateLabel.layer.shadowOpacity = 0.30f;
         [self addSubview:_dateLabel];
         
-        // Метка Батареи
-        _batteryLabel = [[UILabel alloc] init];
-        _batteryLabel.translatesAutoresizingMaskIntoConstraints = NO;
+        // Лейбл батареи
+        _batteryLabel = [[UILabel alloc] initWithFrame:CGRectZero];
         _batteryLabel.textColor = [[UIColor whiteColor] colorWithAlphaComponent:0.8f];
         _batteryLabel.font = [UIFont systemFontOfSize:13.0 weight:UIFontWeightMedium];
         [self addSubview:_batteryLabel];
-        
-        // Layout Constraints (AutoLayout предотвращает сбои ориентации на iPad/iPhone)
-        [NSLayoutConstraint activateConstraints:@[
-            [_timeLabel.topAnchor constraintEqualToAnchor:self.topAnchor],
-            [_timeLabel.leadingAnchor constraintEqualToAnchor:self.leadingAnchor constant:16],
-            [_timeLabel.trailingAnchor constraintEqualToAnchor:self.trailingAnchor constant:-16],
-            
-            [_dateLabel.topAnchor constraintEqualToAnchor:_timeLabel.bottomAnchor constant:4],
-            [_dateLabel.leadingAnchor constraintEqualToAnchor:self.leadingAnchor constant:16],
-            [_dateLabel.trailingAnchor constraintEqualToAnchor:self.trailingAnchor constant:-16],
-            
-            [_batteryLabel.topAnchor constraintEqualToAnchor:_dateLabel.bottomAnchor constant:4],
-            [_batteryLabel.leadingAnchor constraintEqualToAnchor:self.leadingAnchor constant:16],
-            [_batteryLabel.trailingAnchor constraintEqualToAnchor:self.trailingAnchor constant:-16],
-            [_batteryLabel.bottomAnchor constraintLessThanOrEqualToAnchor:self.bottomAnchor]
-        ]];
         
         [self applyConfiguration];
         [self updateClock];
@@ -95,17 +77,49 @@ static void PreferencesChangedCallback(CFNotificationCenterRef center, void *obs
     return self;
 }
 
+- (void)layoutSubviews {
+    [super layoutSubviews];
+    
+    CGRect bounds = [self bounds];
+    if (CGRectIsEmpty(bounds)) return;
+    
+    CGFloat padding = 16.0f;
+    CGFloat contentWidth = bounds.size.width - (padding * 2.0f);
+    if (contentWidth <= 0) return;
+    
+    CGFloat currentY = 0.0f;
+    
+    // Расчет фрейма времени
+    CGSize timeSize = [self.timeLabel sizeThatFits:CGSizeMake(contentWidth, CGFLOAT_MAX)];
+    self.timeLabel.frame = CGRectMake(padding, currentY, contentWidth, timeSize.height);
+    currentY += timeSize.height + 2.0f;
+    
+    // Расчет фрейма даты
+    if (self.dateLabel.text.length > 0) {
+        CGSize dateSize = [self.dateLabel sizeThatFits:CGSizeMake(contentWidth, CGFLOAT_MAX)];
+        self.dateLabel.frame = CGRectMake(padding, currentY, contentWidth, dateSize.height);
+        currentY += dateSize.height + 4.0f;
+    }
+    
+    // Расчет фрейма батареи
+    if (gPrefs.showBattery && self.batteryLabel.text.length > 0) {
+        CGSize batSize = [self.batteryLabel sizeThatFits:CGSizeMake(contentWidth, CGFLOAT_MAX)];
+        self.batteryLabel.frame = CGRectMake(padding, currentY, contentWidth, batSize.height);
+    }
+}
+
 - (void)applyConfiguration {
     self.timeLabel.textAlignment = gPrefs.alignment;
     self.dateLabel.textAlignment = gPrefs.alignment;
     self.batteryLabel.textAlignment = gPrefs.alignment;
     
-    // В iOS 18 используем моноширинные цифры для предотвращения дёргания лейаута при обновлении секунд
+    // Моноширинные цифры исключают дрожание текста при смене секунд
     self.timeLabel.font = [UIFont monospacedDigitSystemFontOfSize:gPrefs.timeFontSize weight:UIFontWeightBold];
     self.dateLabel.font = [UIFont systemFontOfSize:gPrefs.dateFontSize weight:UIFontWeightMedium];
     
     self.batteryLabel.hidden = !gPrefs.showBattery;
     self.hidden = !gPrefs.enabled;
+    [self setNeedsLayout];
 }
 
 - (void)startTimer {
@@ -115,12 +129,14 @@ static void PreferencesChangedCallback(CFNotificationCenterRef center, void *obs
     NSTimeInterval interval = gPrefs.showSeconds ? 1.0 : 60.0;
     __weak typeof(self) weakSelf = self;
     
-    // Использование блока предотвращает retain cycle и краш при деаллокации
-    self.timer = [NSTimer scheduledTimerWithTimeInterval:interval repeats:YES block:^(NSTimer * _Nonnull timer) {
-        [weakSelf updateClock];
+    self.timer = [NSTimer timerWithTimeInterval:interval repeats:YES block:^(NSTimer * _Nonnull timer) {
+        typeof(weakSelf) strongSelf = weakSelf;
+        if (strongSelf) {
+            [strongSelf updateClock];
+        }
     }];
     
-    // NSRunLoopCommonModes гарантирует обновление часов во время скролла уведомлений
+    // Регистрация в общем режиме RunLoop для непрерывного тика при скролле
     [[NSRunLoop mainRunLoop] addTimer:self.timer forMode:NSRunLoopCommonModes];
 }
 
@@ -136,32 +152,40 @@ static void PreferencesChangedCallback(CFNotificationCenterRef center, void *obs
     
     NSDate *now = [NSDate date];
     
-    // Форматирование времени
-    NSDateFormatter *timeFormatter = [[NSDateFormatter alloc] init];
-    [timeFormatter setLocale:[NSLocale currentLocale]];
-    [timeFormatter setDateFormat:gPrefs.showSeconds ? @"HH:mm:ss" : @"HH:mm"];
-    self.timeLabel.text = [timeFormatter stringFromDate:now];
+    // Кэширование форматтеров снижает нагрузку на CPU
+    static NSDateFormatter *sTimeFormatter = nil;
+    static NSDateFormatter *sDateFormatter = nil;
+    static dispatch_once_t sOnceToken;
+    dispatch_once(&sOnceToken, ^{
+        sTimeFormatter = [[NSDateFormatter alloc] init];
+        sDateFormatter = [[NSDateFormatter alloc] init];
+    });
     
-    // Форматирование даты
-    NSDateFormatter *dateFormatter = [[NSDateFormatter alloc] init];
-    [dateFormatter setLocale:[NSLocale currentLocale]];
-    [dateFormatter setDateFormat:gPrefs.customDateFormatEnabled ? @"EEEE, d MMMM" : @"d MMMM"];
-    self.dateLabel.text = [[dateFormatter stringFromDate:now] capitalizedString];
+    [sTimeFormatter setLocale:[NSLocale currentLocale]];
+    [sTimeFormatter setDateFormat:gPrefs.showSeconds ? @"HH:mm:ss" : @"HH:mm"];
+    self.timeLabel.text = [sTimeFormatter stringFromDate:now];
     
-    // Обновление батареи
+    [sDateFormatter setLocale:[NSLocale currentLocale]];
+    [sDateFormatter setDateFormat:gPrefs.customDateFormatEnabled ? @"EEEE, d MMMM" : @"d MMMM"];
+    self.dateLabel.text = [[sDateFormatter stringFromDate:now] capitalizedString];
+    
     if (gPrefs.showBattery) {
         [UIDevice currentDevice].batteryMonitoringEnabled = YES;
         float batLevel = [UIDevice currentDevice].batteryLevel;
-        NSInteger batPercent = (NSInteger)(batLevel * 100);
         UIDeviceBatteryState state = [UIDevice currentDevice].batteryState;
         
-        NSString *stateGlyph = (state == UIDeviceBatteryStateCharging || state == UIDeviceBatteryStateFull) ? @" ⚡︎" : @"";
-        if (batLevel < 0) {
+        if (batLevel < 0.0f) {
             self.batteryLabel.text = @"";
         } else {
+            NSInteger batPercent = (NSInteger)roundf(batLevel * 100.0f);
+            NSString *stateGlyph = (state == UIDeviceBatteryStateCharging || state == UIDeviceBatteryStateFull) ? @" ⚡︎" : @"";
             self.batteryLabel.text = [NSString stringWithFormat:@"%ld%%%@", (long)batPercent, stateGlyph];
         }
+    } else {
+        self.batteryLabel.text = @"";
     }
+    
+    [self setNeedsLayout];
 }
 
 - (void)dealloc {
@@ -170,7 +194,7 @@ static void PreferencesChangedCallback(CFNotificationCenterRef center, void *obs
 
 @end
 
-// MARK: - Хуки SpringBoard / CoverSheet
+// MARK: - Хуки SpringBoard
 
 %hook SBFLockScreenDateView
 
@@ -179,76 +203,78 @@ static void PreferencesChangedCallback(CFNotificationCenterRef center, void *obs
     
     if (!self) return;
     
-    LS_EXECUTE_ON_MAIN_THREAD(^{
-        if (!gPrefs.enabled) {
-            // Восстановление видимости нативных элементов при отключении твика
-            for (UIView *subview in self.subviews) {
-                if (subview.tag == LSCLOCK_VIEW_TAG) {
-                    [subview removeFromSuperview];
-                } else {
-                    subview.alpha = 1.0f;
-                }
-            }
-            return;
-        }
-        
-        // Скрытие стандартных меток iOS 18 без разрушения структуры PosterKit
-        if (gPrefs.hideOriginalClock) {
-            for (UIView *subview in self.subviews) {
-                if (subview.tag != LSCLOCK_VIEW_TAG) {
-                    subview.alpha = 0.0f;
-                }
+    // Явное приведение self к UIView исключает ошибку компиляции dot-синтаксиса
+    UIView *selfView = (UIView *)self;
+    
+    if (!gPrefs.enabled) {
+        for (UIView *subview in [selfView subviews]) {
+            if (subview.tag == LSCLOCK_VIEW_TAG) {
+                [subview removeFromSuperview];
+            } else {
+                subview.alpha = 1.0f;
             }
         }
-        
-        // Поиск или создание единственного экземпляра нашего вью
-        LSClockContainerView *customView = (LSClockContainerView *)[self viewWithTag:LSCLOCK_VIEW_TAG];
-        if (!customView) {
-            customView = [[LSClockContainerView alloc] initWithFrame:self.bounds];
-            [self addSubview:customView];
-            gActiveClockView = customView;
-        } else {
-            customView.frame = self.bounds;
+        return;
+    }
+    
+    if (gPrefs.hideOriginalClock) {
+        for (UIView *subview in [selfView subviews]) {
+            if (subview.tag != LSCLOCK_VIEW_TAG) {
+                subview.alpha = 0.0f;
+            }
         }
-    });
+    }
+    
+    LSClockContainerView *customView = (LSClockContainerView *)[selfView viewWithTag:LSCLOCK_VIEW_TAG];
+    if (!customView) {
+        customView = [[LSClockContainerView alloc] initWithFrame:[selfView bounds]];
+        [selfView addSubview:customView];
+        gActiveClockView = customView;
+    } else {
+        customView.frame = [selfView bounds];
+        [customView setNeedsLayout];
+    }
 }
 
 - (void)didMoveToWindow {
     %orig;
     if (!self) return;
     
-    LS_EXECUTE_ON_MAIN_THREAD(^{
-        LSClockContainerView *customView = (LSClockContainerView *)[self viewWithTag:LSCLOCK_VIEW_TAG];
-        if (self.window) {
-            [customView startTimer];
-            [customView updateClock];
-        } else {
-            [customView stopTimer];
-        }
-    });
+    UIView *selfView = (UIView *)self;
+    LSClockContainerView *customView = (LSClockContainerView *)[selfView viewWithTag:LSCLOCK_VIEW_TAG];
+    
+    if ([selfView window]) {
+        [customView startTimer];
+        [customView updateClock];
+    } else {
+        [customView stopTimer];
+    }
 }
 
 %end
 
-// MARK: - Управление жизненным циклом (AOD и блокировка экрана)
+// MARK: - Управление состоянием экрана (AOD / LockScreen)
 %hook CSCoverSheetViewController
 
 - (void)viewWillAppear:(BOOL)animated {
     %orig;
     if (gActiveClockView) {
         LS_EXECUTE_ON_MAIN_THREAD(^{
-            [gActiveClockView startTimer];
-            [gActiveClockView updateClock];
+            if (gActiveClockView) {
+                [gActiveClockView startTimer];
+                [gActiveClockView updateClock];
+            }
         });
     }
 }
 
 - (void)viewDidDisappear:(BOOL)animated {
     %orig;
-    // Остановка таймера при разблокировке устройства экономит заряд аккумулятора
     if (gActiveClockView) {
         LS_EXECUTE_ON_MAIN_THREAD(^{
-            [gActiveClockView stopTimer];
+            if (gActiveClockView) {
+                [gActiveClockView stopTimer];
+            }
         });
     }
 }
@@ -260,7 +286,6 @@ static void PreferencesChangedCallback(CFNotificationCenterRef center, void *obs
     @autoreleasepool {
         LoadPreferences();
         
-        // Регистрация слушателя изменения настроек через Darwin Notification Center
         CFNotificationCenterAddObserver(
             CFNotificationCenterGetDarwinNotifyCenter(),
             NULL,
@@ -270,9 +295,6 @@ static void PreferencesChangedCallback(CFNotificationCenterRef center, void *obs
             CFNotificationSuspensionBehaviorDeliverImmediately
         );
         
-        %init(
-            SBFLockScreenDateView = objc_getClass("SBFLockScreenDateView"),
-            CSCoverSheetViewController = objc_getClass("CSCoverSheetViewController")
-        );
+        %init;
     }
 }
