@@ -32,13 +32,9 @@ typedef struct {
 } LSClockPreferences;
 
 @interface SBFLockScreenDateView : UIView
-@property (nonatomic, retain) UIView *customSubtitleView;
-- (void)_updateLabels;
-- (void)updateFormat;
 @end
 
 @interface CSCoverSheetViewController : UIViewController
-@property (nonatomic, readonly) BOOL isPresented;
 @end
 
 @interface LSClockContainerView : UIView
