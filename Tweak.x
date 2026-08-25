@@ -7,12 +7,19 @@
 #define jbroot(path) @"/var/jb" path
 #endif
 
-// Безопасный декодер GIF
-static UIImage *AnimatedGIFFromFilePath(NSString *filePath) {
-    if (!filePath || ![[NSFileManager defaultManager] fileExistsAtPath:filePath]) return nil;
-    
-    NSURL *fileURL = [NSURL fileURLWithPath:filePath];
-    CGImageSourceRef source = CGImageSourceCreateWithURL((__bridge CFURLRef)fileURL, NULL);
+// ==========================================
+// Безопасный декодер GIF файлов
+// ==========================================
+static UIImage *SafeAnimatedGIFFromFilePath(NSString *filePath) {
+    if (!filePath || filePath.length == 0) return nil;
+
+    NSFileManager *fileManager = [NSFileManager defaultManager];
+    if (![fileManager fileExistsAtPath:filePath]) return nil;
+
+    NSData *data = [NSData dataWithContentsOfFile:filePath options:NSDataReadingMappedIfSafe error:nil];
+    if (!data || data.length == 0) return nil;
+
+    CGImageSourceRef source = CGImageSourceCreateWithData((__bridge CFDataRef)data, NULL);
     if (!source) return nil;
 
     size_t count = CGImageSourceGetCount(source);
@@ -22,9 +29,12 @@ static UIImage *AnimatedGIFFromFilePath(NSString *filePath) {
     }
 
     if (count == 1) {
-        UIImage *singleImage = [UIImage imageWithContentsOfFile:filePath];
+        CGImageRef cgImg = CGImageSourceCreateImageAtIndex(source, 0, NULL);
         CFRelease(source);
-        return singleImage;
+        if (!cgImg) return nil;
+        UIImage *img = [UIImage imageWithCGImage:cgImg];
+        CGImageRelease(cgImg);
+        return img;
     }
 
     NSMutableArray<UIImage *> *images = [NSMutableArray arrayWithCapacity:count];
@@ -45,128 +55,155 @@ static UIImage *AnimatedGIFFromFilePath(NSString *filePath) {
                 if (!delay || delay.floatValue <= 0) {
                     delay = CFDictionaryGetValue(gifProperties, kCGImagePropertyGIFDelayTime);
                 }
-                totalDuration += delay.doubleValue;
+                totalDuration += (delay ? delay.doubleValue : 0.1);
             }
             CFRelease(properties);
         }
     }
     CFRelease(source);
 
-    if (totalDuration == 0) totalDuration = (1.0 / 10.0) * count;
+    if (images.count == 0) return nil;
+    if (totalDuration <= 0) totalDuration = 0.1 * images.count;
+
     return [UIImage animatedImageWithImages:images duration:totalDuration];
 }
 
-static NSMutableDictionary<NSString *, UIImage *> *digitImageCache = nil;
+// ==========================================
+// Потокобезопасное кэширование цифр
+// ==========================================
+static NSDictionary<NSString *, UIImage *> *sDigitCache = nil;
 
-static void LoadDigitImagesIfNeeded(void) {
+static void LoadDigitCacheIfNeeded(void) {
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
-        digitImageCache = [NSMutableDictionary new];
+        NSMutableDictionary *dict = [NSMutableDictionary new];
         NSString *basePath = jbroot(@"/Library/Application Support/LSClock/Digits/");
+
         for (int i = 0; i <= 9; i++) {
-            NSString *fileName = [NSString stringWithFormat:@"%d.gif", i];
-            NSString *fullPath = [basePath stringByAppendingPathComponent:fileName];
-            UIImage *animatedGIF = AnimatedGIFFromFilePath(fullPath);
-            if (animatedGIF) {
-                digitImageCache[@(i).stringValue] = animatedGIF;
+            NSString *path = [basePath stringByAppendingPathComponent:[NSString stringWithFormat:@"%d.gif", i]];
+            UIImage *img = SafeAnimatedGIFFromFilePath(path);
+            if (img) {
+                dict[@(i).stringValue] = img;
             }
         }
+        sDigitCache = [dict copy];
     });
 }
 
-@interface CSProminentTimeView : UIView
-@property (nonatomic, strong) UIView *customClockContainer;
+// ==========================================
+// Изолированный контейнер часов
+// ==========================================
+@interface LSClockContainerView : UIView
 @property (nonatomic, strong) UIImageView *hourTensImageView;
 @property (nonatomic, strong) UIImageView *hourOnesImageView;
 @property (nonatomic, strong) UIImageView *minuteTensImageView;
 @property (nonatomic, strong) UIImageView *minuteOnesImageView;
-
-- (void)setupCustomClockView;
-- (void)updateCustomGIFClock;
+- (void)updateTime;
 @end
 
-%hook CSProminentTimeView
-
-%property (nonatomic, strong) UIView *customClockContainer;
-%property (nonatomic, strong) UIImageView *hourTensImageView;
-%property (nonatomic, strong) UIImageView *hourOnesImageView;
-%property (nonatomic, strong) UIImageView *minuteTensImageView;
-%property (nonatomic, strong) UIImageView *minuteOnesImageView;
+@implementation LSClockContainerView
 
 - (instancetype)initWithFrame:(CGRect)frame {
-    self = %orig;
+    self = [super initWithFrame:frame];
     if (self) {
-        [self setupCustomClockView];
+        self.userInteractionEnabled = NO;
+        self.clipsToBounds = NO;
+
+        _hourTensImageView = [[UIImageView alloc] init];
+        _hourOnesImageView = [[UIImageView alloc] init];
+        _minuteTensImageView = [[UIImageView alloc] init];
+        _minuteOnesImageView = [[UIImageView alloc] init];
+
+        NSArray *views = @[_hourTensImageView, _hourOnesImageView, _minuteTensImageView, _minuteOnesImageView];
+        for (UIImageView *v in views) {
+            v.contentMode = UIViewContentModeScaleAspectFit;
+            v.clipsToBounds = YES;
+            [self addSubview:v];
+        }
+        [self updateTime];
     }
     return self;
 }
 
-- (void)didMoveToWindow {
-    %orig;
-    if (self.window) {
-        [self setupCustomClockView];
-    }
+- (void)layoutSubviews {
+    [super layoutSubviews];
+
+    CGFloat w = self.bounds.size.width;
+    CGFloat h = self.bounds.size.height;
+
+    if (w <= 0 || h <= 0) return;
+
+    CGFloat digitW = w / 4.5;
+
+    _hourTensImageView.frame = CGRectMake(0, 0, digitW, h);
+    _hourOnesImageView.frame = CGRectMake(digitW, 0, digitW, h);
+    _minuteTensImageView.frame = CGRectMake(digitW * 2.5, 0, digitW, h);
+    _minuteOnesImageView.frame = CGRectMake(digitW * 3.5, 0, digitW, h);
 }
 
-%new
-- (void)setupCustomClockView {
-    if (self.customClockContainer) return;
+- (void)updateTime {
+    LoadDigitCacheIfNeeded();
+    if (!sDigitCache || sDigitCache.count == 0) return;
 
-    LoadDigitImagesIfNeeded();
+    NSDateComponents *comp = [[NSCalendar currentCalendar] components:(NSCalendarUnitHour | NSCalendarUnitMinute) fromDate:[NSDate date]];
+    NSInteger hour = comp.hour;
+    NSInteger minute = comp.minute;
 
-    self.customClockContainer = [[UIView alloc] initWithFrame:self.bounds];
-    self.customClockContainer.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-    self.customClockContainer.userInteractionEnabled = NO;
+    NSString *hT = [NSString stringWithFormat:@"%ld", (long)(hour / 10)];
+    NSString *hO = [NSString stringWithFormat:@"%ld", (long)(hour % 10)];
+    NSString *mT = [NSString stringWithFormat:@"%ld", (long)(minute / 10)];
+    NSString *mO = [NSString stringWithFormat:@"%ld", (long)(minute % 10)];
 
-    CGFloat digitWidth = self.bounds.size.width / 4.5;
-    CGFloat digitHeight = self.bounds.size.height;
-
-    self.hourTensImageView = [[UIImageView alloc] initWithFrame:CGRectMake(0, 0, digitWidth, digitHeight)];
-    self.hourOnesImageView = [[UIImageView alloc] initWithFrame:CGRectMake(digitWidth, 0, digitWidth, digitHeight)];
-    self.minuteTensImageView = [[UIImageView alloc] initWithFrame:CGRectMake(digitWidth * 2.5, 0, digitWidth, digitHeight)];
-    self.minuteOnesImageView = [[UIImageView alloc] initWithFrame:CGRectMake(digitWidth * 3.5, 0, digitWidth, digitHeight)];
-
-    NSArray *views = @[self.hourTensImageView, self.hourOnesImageView, self.minuteTensImageView, self.minuteOnesImageView];
-    for (UIImageView *v in views) {
-        v.contentMode = UIViewContentModeScaleAspectFit;
-        [self.customClockContainer addSubview:v];
-    }
-
-    [self addSubview:self.customClockContainer];
-    [self updateCustomGIFClock];
+    if (sDigitCache[hT]) _hourTensImageView.image = sDigitCache[hT];
+    if (sDigitCache[hO]) _hourOnesImageView.image = sDigitCache[hO];
+    if (sDigitCache[mT]) _minuteTensImageView.image = sDigitCache[mT];
+    if (sDigitCache[mO]) _minuteOnesImageView.image = sDigitCache[mO];
 }
 
-%new
-- (void)updateCustomGIFClock {
-    NSDate *now = [NSDate date];
-    NSCalendar *calendar = [NSCalendar currentCalendar];
-    NSDateComponents *components = [calendar components:(NSCalendarUnitHour | NSCalendarUnitMinute) fromDate:now];
+@end
 
-    NSInteger hour = components.hour;
-    NSInteger minute = components.minute;
+// ==========================================
+// Безопасный хук системы
+// ==========================================
+@interface CSProminentTimeView : UIView
+@property (nonatomic, strong) LSClockContainerView *lsClockContainer;
+@end
 
-    NSString *hTens = [NSString stringWithFormat:@"%ld", (long)(hour / 10)];
-    NSString *hOnes = [NSString stringWithFormat:@"%ld", (long)(hour % 10)];
-    NSString *mTens = [NSString stringWithFormat:@"%ld", (long)(minute / 10)];
-    NSString *mOnes = [NSString stringWithFormat:@"%ld", (long)(minute % 10)];
+%hook CSProminentTimeView
 
-    if (digitImageCache[hTens]) self.hourTensImageView.image = digitImageCache[hTens];
-    if (digitImageCache[hOnes]) self.hourOnesImageView.image = digitImageCache[hOnes];
-    if (digitImageCache[mTens]) self.minuteTensImageView.image = digitImageCache[mTens];
-    if (digitImageCache[mOnes]) self.minuteOnesImageView.image = digitImageCache[mOnes];
-}
+%property (nonatomic, strong) LSClockContainerView *lsClockContainer;
 
 - (void)layoutSubviews {
     %orig;
-    if (self.customClockContainer) {
-        self.customClockContainer.frame = self.bounds;
-        CGFloat digitWidth = self.bounds.size.width / 4.5;
-        CGFloat digitHeight = self.bounds.size.height;
-        self.hourTensImageView.frame = CGRectMake(0, 0, digitWidth, digitHeight);
-        self.hourOnesImageView.frame = CGRectMake(digitWidth, 0, digitWidth, digitHeight);
-        self.minuteTensImageView.frame = CGRectMake(digitWidth * 2.5, 0, digitWidth, digitHeight);
-        self.minuteOnesImageView.frame = CGRectMake(digitWidth * 3.5, 0, digitWidth, digitHeight);
+
+    // Защита от нулевых размеров при инициализации
+    if (CGRectIsEmpty(self.bounds) || self.bounds.size.width <= 0 || self.bounds.size.height <= 0) {
+        return;
+    }
+
+    // Безопасное скрытие оригинального текста без сбоя Auto Layout
+    for (UIView *subview in self.subviews) {
+        if (subview != self.lsClockContainer) {
+            subview.alpha = 0.001;
+        }
+    }
+
+    // Ленивая инициализация
+    if (!self.lsClockContainer) {
+        LSClockContainerView *container = [[LSClockContainerView alloc] initWithFrame:self.bounds];
+        container.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+        self.lsClockContainer = container;
+        [self addSubview:container];
+    } else {
+        self.lsClockContainer.frame = self.bounds;
+        [self.lsClockContainer updateTime];
     }
 }
 
 %end
+
+%ctor {
+    @autoreleasepool {
+        %init;
+    }
+}
