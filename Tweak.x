@@ -1,12 +1,13 @@
 #import <UIKit/UIKit.h>
 #import <ImageIO/ImageIO.h>
 #import <substrate.h>
+#import "Tweak.h"
 
 #ifndef jbroot
 #define jbroot(path) @"/var/jb" path
 #endif
 
-// Функция декодирования GIF-файла в анимированный UIImage
+// Декодирование GIF-файла в анимированный UIImage
 static UIImage *AnimatedGIFFromFilePath(NSString *filePath) {
     NSURL *fileURL = [NSURL fileURLWithPath:filePath];
     CGImageSourceRef source = CGImageSourceCreateWithURL((__bridge CFURLRef)fileURL, NULL);
@@ -29,7 +30,6 @@ static UIImage *AnimatedGIFFromFilePath(NSString *filePath) {
             CGImageRelease(imageRef);
         }
 
-        // Вычисляем длительность отображения кадров
         CFDictionaryRef properties = CGImageSourceCopyPropertiesAtIndex(source, i, NULL);
         if (properties) {
             CFDictionaryRef gifProperties = CFDictionaryGetValue(properties, kCGImagePropertyGIFDictionary);
@@ -45,12 +45,12 @@ static UIImage *AnimatedGIFFromFilePath(NSString *filePath) {
     }
     CFRelease(source);
 
-    if (totalDuration == 0) totalDuration = (1.0 / 10.0) * count; // Запасной интервал
+    if (totalDuration == 0) totalDuration = (1.0 / 10.0) * count;
 
     return [UIImage animatedImageWithImages:images duration:totalDuration];
 }
 
-// Кэш для анимированных цифр
+// Кэширование кастомных анимированных цифр
 static NSMutableDictionary<NSString *, UIImage *> *digitImageCache = nil;
 
 static void LoadDigitImagesIfNeeded() {
@@ -60,7 +60,6 @@ static void LoadDigitImagesIfNeeded() {
     NSString *basePath = jbroot(@"/Library/Application Support/LSClock/Digits/");
     
     for (int i = 0; i <= 9; i++) {
-        // Ищем .gif файлы цифр (0.gif, 1.gif ... 9.gif)
         NSString *fileName = [NSString stringWithFormat:@"%d.gif", i];
         NSString *fullPath = [basePath stringByAppendingPathComponent:fileName];
         
@@ -70,3 +69,97 @@ static void LoadDigitImagesIfNeeded() {
         }
     }
 }
+
+// Хук часов экрана блокировки iOS 16-18
+@interface CSProminentTimeView : UIView
+@property (nonatomic, strong) UIView *customClockContainer;
+@property (nonatomic, strong) UIImageView *hourTensImageView;
+@property (nonatomic, strong) UIImageView *hourOnesImageView;
+@property (nonatomic, strong) UIImageView *minuteTensImageView;
+@property (nonatomic, strong) UIImageView *minuteOnesImageView;
+- (void)updateCustomGIFClock;
+@end
+
+%hook CSProminentTimeView
+
+%property (nonatomic, strong) UIView *customClockContainer;
+%property (nonatomic, strong) UIImageView *hourTensImageView;
+%property (nonatomic, strong) UIImageView *hourOnesImageView;
+%property (nonatomic, strong) UIImageView *minuteTensImageView;
+%property (nonatomic, strong) UIImageView *minuteOnesImageView;
+
+- (instancetype)initWithFrame:(CGRect)frame {
+    self = %orig;
+    if (self) {
+        [self setupCustomClockView];
+    }
+    return self;
+}
+
+%new
+- (void)setupCustomClockView {
+    LoadDigitImagesIfNeeded();
+    
+    if (self.customClockContainer) return;
+
+    for (UIView *subview in self.subviews) {
+        if ([subview isKindOfClass:[UILabel class]] || [NSStringFromClass([subview class]) containsString:@"Label"]) {
+            subview.hidden = YES;
+        }
+    }
+
+    self.customClockContainer = [[UIView alloc] initWithFrame:self.bounds];
+    self.customClockContainer.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    self.customClockContainer.userInteractionEnabled = NO;
+    [self addSubview:self.customClockContainer];
+
+    CGFloat digitWidth = self.bounds.size.width / 4.5;
+    CGFloat digitHeight = self.bounds.size.height;
+
+    self.hourTensImageView = [[UIImageView alloc] initWithFrame:CGRectMake(0, 0, digitWidth, digitHeight)];
+    self.hourOnesImageView = [[UIImageView alloc] initWithFrame:CGRectMake(digitWidth, 0, digitWidth, digitHeight)];
+    self.minuteTensImageView = [[UIImageView alloc] initWithFrame:CGRectMake(digitWidth * 2.5, 0, digitWidth, digitHeight)];
+    self.minuteOnesImageView = [[UIImageView alloc] initWithFrame:CGRectMake(digitWidth * 3.5, 0, digitWidth, digitHeight)];
+
+    NSArray *views = @[self.hourTensImageView, self.hourOnesImageView, self.minuteTensImageView, self.minuteOnesImageView];
+    for (UIImageView *v in views) {
+        v.contentMode = UIViewContentModeScaleAspectFit;
+        [self.customClockContainer addSubview:v];
+    }
+
+    [self updateCustomGIFClock];
+}
+
+%new
+- (void)updateCustomGIFClock {
+    NSDate *now = [NSDate date];
+    NSCalendar *calendar = [NSCalendar currentCalendar];
+    NSDateComponents *components = [calendar components:(NSCalendarUnitHour | NSCalendarUnitMinute) fromDate:now];
+
+    NSInteger hour = components.hour;
+    NSInteger minute = components.minute;
+
+    NSString *hTens = [NSString stringWithFormat:@"%ld", (long)(hour / 10)];
+    NSString *hOnes = [NSString stringWithFormat:@"%ld", (long)(hour % 10)];
+    NSString *mTens = [NSString stringWithFormat:@"%ld", (long)(minute / 10)];
+    NSString *mOnes = [NSString stringWithFormat:@"%ld", (long)(minute % 10)];
+
+    if (digitImageCache[hTens]) self.hourTensImageView.image = digitImageCache[hTens];
+    if (digitImageCache[hOnes]) self.hourOnesImageView.image = digitImageCache[hOnes];
+    if (digitImageCache[mTens]) self.minuteTensImageView.image = digitImageCache[mTens];
+    if (digitImageCache[mOnes]) self.minuteOnesImageView.image = digitImageCache[mOnes];
+}
+
+- (void)layoutSubviews {
+    %orig;
+    
+    for (UIView *subview in self.subviews) {
+        if (subview != self.customClockContainer) {
+            subview.alpha = 0.0;
+        }
+    }
+
+    [self updateCustomGIFClock];
+}
+
+%end
