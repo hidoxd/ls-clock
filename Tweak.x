@@ -70,13 +70,15 @@ static void LoadDigitImagesIfNeeded() {
     }
 }
 
-// Хук часов экрана блокировки iOS 16-18
+// Предварительное объявление класса и методов для компилятора Clang
 @interface CSProminentTimeView : UIView
 @property (nonatomic, strong) UIView *customClockContainer;
 @property (nonatomic, strong) UIImageView *hourTensImageView;
 @property (nonatomic, strong) UIImageView *hourOnesImageView;
 @property (nonatomic, strong) UIImageView *minuteTensImageView;
 @property (nonatomic, strong) UIImageView *minuteOnesImageView;
+
+- (void)setupCustomClockView;
 - (void)updateCustomGIFClock;
 @end
 
