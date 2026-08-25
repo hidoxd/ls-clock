@@ -8,6 +8,6 @@ TWEAK_NAME = LSClock
 
 LSClock_FILES = Tweak.x
 LSClock_CFLAGS = -fobjc-arc -Wno-deprecated-declarations -Wno-unused-variable
-LSClock_FRAMEWORKS = UIKit Foundation CoreFoundation QuartzCore ImageIO CoreGraphics
+LSClock_FRAMEWORKS = UIKit Foundation CoreFoundation
 
 include $(THEOS)/makefiles/tweak.mk
