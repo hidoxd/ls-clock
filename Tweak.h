@@ -4,6 +4,7 @@
 
 @interface CSProminentTimeView : UIView
 @property (nonatomic, strong) LSClockContainerView *lsClockContainer;
-- (void)ls_hideSystemSubviews;
-- (void)ls_setupCustomClock;
+@end
+
+@interface SpringBoard : UIApplication
 @end
