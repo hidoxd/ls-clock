@@ -6,73 +6,51 @@
 #define jbroot(path) @"/var/jb" path
 #endif
 
+static BOOL sTweakReady = NO;
 static NSDictionary<NSString *, UIImage *> *sDigitCache = nil;
 
-// Автоматическая загрузка PNG или GIF без сбоев
-static void LoadDigitCacheIfNeeded(void) {
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        NSMutableDictionary *dict = [NSMutableDictionary new];
-        NSString *basePath = jbroot(@"/Library/Application Support/LSClock/Digits/");
-        NSFileManager *fm = [NSFileManager defaultManager];
+// Однократная загрузка изображений в память при старте
+static void PreloadImages(void) {
+    NSMutableDictionary *dict = [NSMutableDictionary new];
+    NSString *basePath = jbroot(@"/Library/Application Support/LSClock/Digits/");
 
-        for (int i = 0; i <= 9; i++) {
-            NSString *key = @(i).stringValue;
-            NSString *pngPath = [basePath stringByAppendingPathComponent:[NSString stringWithFormat:@"%d.png", i]];
-            NSString *gifPath = [basePath stringByAppendingPathComponent:[NSString stringWithFormat:@"%d.gif", i]];
+    for (int i = 0; i <= 9; i++) {
+        NSString *png = [basePath stringByAppendingPathComponent:[NSString stringWithFormat:@"%d.png", i]];
+        NSString *gif = [basePath stringByAppendingPathComponent:[NSString stringWithFormat:@"%d.gif", i]];
+        UIImage *img = [UIImage imageWithContentsOfFile:png] ?: [UIImage imageWithContentsOfFile:gif];
+        if (img) dict[@(i).stringValue] = img;
+    }
 
-            UIImage *img = nil;
-            if ([fm fileExistsAtPath:pngPath]) {
-                img = [UIImage imageWithContentsOfFile:pngPath];
-            } else if ([fm fileExistsAtPath:gifPath]) {
-                img = [UIImage imageWithContentsOfFile:gifPath];
-            }
-            if (img) dict[key] = img;
-        }
+    NSString *cPng = [basePath stringByAppendingPathComponent:@"colon.png"];
+    NSString *cGif = [basePath stringByAppendingPathComponent:@"colon.gif"];
+    UIImage *cImg = [UIImage imageWithContentsOfFile:cPng] ?: [UIImage imageWithContentsOfFile:cGif];
+    if (cImg) dict[@"colon"] = cImg;
 
-        NSString *colonPng = [basePath stringByAppendingPathComponent:@"colon.png"];
-        NSString *colonGif = [basePath stringByAppendingPathComponent:@"colon.gif"];
-        UIImage *colonImg = nil;
-        if ([fm fileExistsAtPath:colonPng]) {
-            colonImg = [UIImage imageWithContentsOfFile:colonPng];
-        } else if ([fm fileExistsAtPath:colonGif]) {
-            colonImg = [UIImage imageWithContentsOfFile:colonGif];
-        }
-        if (colonImg) dict[@"colon"] = colonImg;
-
-        sDigitCache = [dict copy];
-    });
+    sDigitCache = [dict copy];
 }
 
-// Изолированный UIView для цифр
+// Контейнер кастомных часов
 @interface LSClockContainerView : UIView
-@property (nonatomic, strong) UIImageView *hourTensImageView;
-@property (nonatomic, strong) UIImageView *hourOnesImageView;
-@property (nonatomic, strong) UIImageView *colonImageView;
-@property (nonatomic, strong) UIImageView *minuteTensImageView;
-@property (nonatomic, strong) UIImageView *minuteOnesImageView;
-@property (nonatomic, strong) NSTimer *updateTimer;
+@property (nonatomic, strong) UIImageView *hT, *hO, *col, *mT, *mO;
+@property (nonatomic, strong) NSTimer *timer;
 - (void)updateTime;
 @end
 
 @implementation LSClockContainerView
 
 - (instancetype)initWithFrame:(CGRect)frame {
-    self = [super initWithFrame:frame];
-    if (self) {
+    if ((self = [super initWithFrame:frame])) {
         self.userInteractionEnabled = NO;
-        self.clipsToBounds = NO;
 
-        _hourTensImageView = [[UIImageView alloc] init];
-        _hourOnesImageView = [[UIImageView alloc] init];
-        _colonImageView = [[UIImageView alloc] init];
-        _minuteTensImageView = [[UIImageView alloc] init];
-        _minuteOnesImageView = [[UIImageView alloc] init];
+        _hT = [UIImageView new];
+        _hO = [UIImageView new];
+        _col = [UIImageView new];
+        _mT = [UIImageView new];
+        _mO = [UIImageView new];
 
-        NSArray *views = @[_hourTensImageView, _hourOnesImageView, _colonImageView, _minuteTensImageView, _minuteOnesImageView];
+        NSArray *views = @[_hT, _hO, _col, _mT, _mO];
         for (UIImageView *v in views) {
             v.contentMode = UIViewContentModeScaleAspectFit;
-            v.clipsToBounds = YES;
             [self addSubview:v];
         }
         [self updateTime];
@@ -83,121 +61,75 @@ static void LoadDigitCacheIfNeeded(void) {
 - (void)willMoveToWindow:(UIWindow *)newWindow {
     [super willMoveToWindow:newWindow];
     if (newWindow) {
-        [self startTimer];
         [self updateTime];
+        if (!_timer) {
+            _timer = [NSTimer scheduledTimerWithTimeInterval:1.0 target:self selector:@selector(updateTime) userInfo:nil repeats:YES];
+        }
     } else {
-        [self stopTimer];
-    }
-}
-
-- (void)startTimer {
-    [self stopTimer];
-    _updateTimer = [NSTimer scheduledTimerWithTimeInterval:1.0
-                                                     target:self
-                                                   selector:@selector(updateTime)
-                                                   userInfo:nil
-                                                    repeats:YES];
-}
-
-- (void)stopTimer {
-    if (_updateTimer) {
-        [_updateTimer invalidate];
-        _updateTimer = nil;
+        [_timer invalidate];
+        _timer = nil;
     }
 }
 
 - (void)layoutSubviews {
     [super layoutSubviews];
-
     CGFloat w = self.bounds.size.width;
     CGFloat h = self.bounds.size.height;
-
     if (w <= 0 || h <= 0) return;
 
-    CGFloat digitW = w / 4.5;
-
-    _hourTensImageView.frame = CGRectMake(0, 0, digitW, h);
-    _hourOnesImageView.frame = CGRectMake(digitW, 0, digitW, h);
-    _colonImageView.frame = CGRectMake(digitW * 2.0, 0, digitW * 0.5, h);
-    _minuteTensImageView.frame = CGRectMake(digitW * 2.5, 0, digitW, h);
-    _minuteOnesImageView.frame = CGRectMake(digitW * 3.5, 0, digitW, h);
+    CGFloat dW = w / 4.5;
+    _hT.frame = CGRectMake(0, 0, dW, h);
+    _hO.frame = CGRectMake(dW, 0, dW, h);
+    _col.frame = CGRectMake(dW * 2.0, 0, dW * 0.5, h);
+    _mT.frame = CGRectMake(dW * 2.5, 0, dW, h);
+    _mO.frame = CGRectMake(dW * 3.5, 0, dW, h);
 }
 
 - (void)updateTime {
-    LoadDigitCacheIfNeeded();
-    if (!sDigitCache || sDigitCache.count == 0) return;
+    if (!sDigitCache) return;
+    NSDateComponents *c = [[NSCalendar currentCalendar] components:(NSCalendarUnitHour | NSCalendarUnitMinute) fromDate:[NSDate date]];
 
-    NSDateComponents *comp = [[NSCalendar currentCalendar] components:(NSCalendarUnitHour | NSCalendarUnitMinute) fromDate:[NSDate date]];
-    NSInteger hour = comp.hour;
-    NSInteger minute = comp.minute;
-
-    NSString *hT = [NSString stringWithFormat:@"%ld", (long)(hour / 10)];
-    NSString *hO = [NSString stringWithFormat:@"%ld", (long)(hour % 10)];
-    NSString *mT = [NSString stringWithFormat:@"%ld", (long)(minute / 10)];
-    NSString *mO = [NSString stringWithFormat:@"%ld", (long)(minute % 10)];
-
-    if (sDigitCache[hT] && _hourTensImageView.image != sDigitCache[hT]) _hourTensImageView.image = sDigitCache[hT];
-    if (sDigitCache[hO] && _hourOnesImageView.image != sDigitCache[hO]) _hourOnesImageView.image = sDigitCache[hO];
-    if (sDigitCache[@"colon"] && _colonImageView.image != sDigitCache[@"colon"]) _colonImageView.image = sDigitCache[@"colon"];
-    if (sDigitCache[mT] && _minuteTensImageView.image != sDigitCache[mT]) _minuteTensImageView.image = sDigitCache[mT];
-    if (sDigitCache[mO] && _minuteOnesImageView.image != sDigitCache[mO]) _minuteOnesImageView.image = sDigitCache[mO];
+    _hT.image = sDigitCache[[NSString stringWithFormat:@"%ld", (long)(c.hour / 10)]];
+    _hO.image = sDigitCache[[NSString stringWithFormat:@"%ld", (long)(c.hour % 10)]];
+    _col.image = sDigitCache[@"colon"];
+    _mT.image = sDigitCache[[NSString stringWithFormat:@"%ld", (long)(c.minute / 10)]];
+    _mO.image = sDigitCache[[NSString stringWithFormat:@"%ld", (long)(c.minute % 10)]];
 }
 
 @end
 
-// Безопасный перехват часов
-%hook CSProminentTimeView
+// 1. Активация строго через 5 секунд после успешной загрузки SpringBoard
+%hook SpringBoard
+- (void)applicationDidFinishLaunching:(id)application {
+    %orig;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        sTweakReady = YES;
+    });
+}
+%end
 
+// 2. Перехват системного виджета часов
+%hook CSProminentTimeView
 %property (nonatomic, strong) LSClockContainerView *lsClockContainer;
 
 - (void)didMoveToWindow {
     %orig;
-    if (self.window) {
-        [self ls_hideSystemSubviews];
-        [self ls_setupCustomClock];
-    }
-}
+    if (!sTweakReady) return;
 
-- (void)didAddSubview:(UIView *)subview {
-    %orig;
-    if (self.lsClockContainer && subview != self.lsClockContainer) {
-        subview.alpha = 0.0;
-    }
-}
-
-%new
-- (void)ls_hideSystemSubviews {
-    for (UIView *subview in self.subviews) {
-        if (subview != self.lsClockContainer) {
-            subview.alpha = 0.0;
-        }
-    }
-}
-
-%new
-- (void)ls_setupCustomClock {
-    if (CGRectIsEmpty(self.bounds) || self.bounds.size.width <= 0) return;
-
-    if (!self.lsClockContainer) {
-        LSClockContainerView *container = [[LSClockContainerView alloc] initWithFrame:self.bounds];
-        container.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-        self.lsClockContainer = container;
-        [self addSubview:container];
+    if (self.window && !self.lsClockContainer) {
+        LSClockContainerView *clock = [[LSClockContainerView alloc] initWithFrame:self.bounds];
+        clock.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+        self.lsClockContainer = clock;
+        [self addSubview:clock];
     }
 }
 
 - (void)layoutSubviews {
     %orig;
+    if (!sTweakReady) return;
 
-    if (CGRectIsEmpty(self.bounds) || self.bounds.size.width <= 0) return;
-
-    if (!self.lsClockContainer) {
-        [self ls_hideSystemSubviews];
-        [self ls_setupCustomClock];
-    } else {
-        if (!CGRectEqualToRect(self.lsClockContainer.frame, self.bounds)) {
-            self.lsClockContainer.frame = self.bounds;
-        }
+    if (self.lsClockContainer && !CGRectEqualToRect(self.lsClockContainer.frame, self.bounds)) {
+        self.lsClockContainer.frame = self.bounds;
     }
 }
 
@@ -205,6 +137,7 @@ static void LoadDigitCacheIfNeeded(void) {
 
 %ctor {
     @autoreleasepool {
+        PreloadImages();
         %init;
     }
 }
