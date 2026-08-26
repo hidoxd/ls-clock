@@ -1,4 +1,5 @@
 #import <UIKit/UIKit.h>
+#import <ImageIO/ImageIO.h>
 #import <substrate.h>
 #import "Tweak.h"
 
@@ -6,10 +7,41 @@
 #define jbroot(path) @"/var/jb" path
 #endif
 
-static BOOL sTweakReady = NO;
 static NSDictionary<NSString *, UIImage *> *sDigitCache = nil;
 
-// Однократная загрузка изображений в память при старте
+// Корректная загрузка GIF (с анимацией) и PNG через ImageIO
+static UIImage *LoadImageAtPath(NSString *path) {
+    if (![[NSFileManager defaultManager] fileExistsAtPath:path]) return nil;
+
+    if ([path.pathExtension.lowercaseString isEqualToString:@"gif"]) {
+        NSURL *url = [NSURL fileURLWithPath:path];
+        CGImageSourceRef source = CGImageSourceCreateWithURL((__bridge CFURLRef)url, NULL);
+        if (!source) return nil;
+
+        size_t count = CGImageSourceGetCount(source);
+        if (count <= 1) {
+            CFRelease(source);
+            return [UIImage imageWithContentsOfFile:path];
+        }
+
+        NSMutableArray<UIImage *> *images = [NSMutableArray arrayWithCapacity:count];
+        NSTimeInterval duration = 0.0;
+
+        for (size_t i = 0; i < count; i++) {
+            CGImageRef imageRef = CGImageSourceCreateImageAtIndex(source, i, NULL);
+            if (imageRef) {
+                [images addObject:[UIImage imageWithCGImage:imageRef]];
+                CGImageRelease(imageRef);
+            }
+            duration += 0.1; // Длительность смены кадров GIF
+        }
+        CFRelease(source);
+        return [UIImage animatedImageWithImages:images duration:duration];
+    }
+
+    return [UIImage imageWithContentsOfFile:path];
+}
+
 static void PreloadImages(void) {
     NSMutableDictionary *dict = [NSMutableDictionary new];
     NSString *basePath = jbroot(@"/Library/Application Support/LSClock/Digits/");
@@ -17,22 +49,22 @@ static void PreloadImages(void) {
     for (int i = 0; i <= 9; i++) {
         NSString *png = [basePath stringByAppendingPathComponent:[NSString stringWithFormat:@"%d.png", i]];
         NSString *gif = [basePath stringByAppendingPathComponent:[NSString stringWithFormat:@"%d.gif", i]];
-        UIImage *img = [UIImage imageWithContentsOfFile:png] ?: [UIImage imageWithContentsOfFile:gif];
+
+        UIImage *img = LoadImageAtPath(png) ?: LoadImageAtPath(gif);
         if (img) dict[@(i).stringValue] = img;
     }
 
     NSString *cPng = [basePath stringByAppendingPathComponent:@"colon.png"];
     NSString *cGif = [basePath stringByAppendingPathComponent:@"colon.gif"];
-    UIImage *cImg = [UIImage imageWithContentsOfFile:cPng] ?: [UIImage imageWithContentsOfFile:cGif];
+    UIImage *cImg = LoadImageAtPath(cPng) ?: LoadImageAtPath(cGif);
     if (cImg) dict[@"colon"] = cImg;
 
     sDigitCache = [dict copy];
 }
 
-// Контейнер кастомных часов
 @interface LSClockContainerView : UIView
 @property (nonatomic, strong) UIImageView *hT, *hO, *col, *mT, *mO;
-@property (nonatomic, strong) NSTimer *timer;
+@property (nonatomic, strong) dispatch_source_t timer;
 - (void)updateTime;
 @end
 
@@ -62,11 +94,26 @@ static void PreloadImages(void) {
     [super willMoveToWindow:newWindow];
     if (newWindow) {
         [self updateTime];
-        if (!_timer) {
-            _timer = [NSTimer scheduledTimerWithTimeInterval:1.0 target:self selector:@selector(updateTime) userInfo:nil repeats:YES];
-        }
+        [self startTimer];
     } else {
-        [_timer invalidate];
+        [self stopTimer];
+    }
+}
+
+- (void)startTimer {
+    if (_timer) return;
+    _timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
+    dispatch_source_set_timer(_timer, DISPATCH_TIME_NOW, 1.0 * NSEC_PER_SEC, 0.1 * NSEC_PER_SEC);
+    __weak typeof(self) weakSelf = self;
+    dispatch_source_set_event_handler(_timer, ^{
+        [weakSelf updateTime];
+    });
+    dispatch_resume(_timer);
+}
+
+- (void)stopTimer {
+    if (_timer) {
+        dispatch_source_cancel(_timer);
         _timer = nil;
     }
 }
@@ -98,38 +145,17 @@ static void PreloadImages(void) {
 
 @end
 
-// 1. Активация строго через 5 секунд после успешной загрузки SpringBoard
-%hook SpringBoard
-- (void)applicationDidFinishLaunching:(id)application {
-    %orig;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        sTweakReady = YES;
-    });
-}
-%end
-
-// 2. Перехват системного виджета часов
+// Внедряем контейнер при создании View часов
 %hook CSProminentTimeView
 %property (nonatomic, strong) LSClockContainerView *lsClockContainer;
 
 - (void)didMoveToWindow {
     %orig;
-    if (!sTweakReady) return;
-
     if (self.window && !self.lsClockContainer) {
         LSClockContainerView *clock = [[LSClockContainerView alloc] initWithFrame:self.bounds];
         clock.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
         self.lsClockContainer = clock;
         [self addSubview:clock];
-    }
-}
-
-- (void)layoutSubviews {
-    %orig;
-    if (!sTweakReady) return;
-
-    if (self.lsClockContainer && !CGRectEqualToRect(self.lsClockContainer.frame, self.bounds)) {
-        self.lsClockContainer.frame = self.bounds;
     }
 }
 
