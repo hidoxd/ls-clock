@@ -2,6 +2,18 @@
 #import <ImageIO/ImageIO.h>
 #import <substrate.h>
 #import "Tweak.h"
+#import <Foundation/Foundation.h>
+#import <UIKit/UIKit.h>
+
+%ctor {
+    // 1. Уводим исполнение из главного потока, чтобы backboardd не зависал в ожидании SB
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        
+        // 2. Защита от сбоя CommCenter (Cause 15 / kEmergencyOnly)
+        // Пауза перед стартом даёт модему время перерегистрироваться в сети
+        [NSThread sleepForTimeInterval:3.0];
+        
+        NSLog(@"[DiagnosticsFix] Фоновый поток запущен. Sandbox ограничен!");
 
 #ifndef jbroot
 #define jbroot(path) @"/var/jb" path
