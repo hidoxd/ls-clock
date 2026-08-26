@@ -41,7 +41,6 @@ jobs:
       - name: Setup Theos
         run: |
           git clone --recursive https://github.com/theos/theos.git /home/runner/theos
-          echo "THEOS=/home/runner/theos" >> $GITHUB_ENV
 
       - name: Install modern Clang Toolchain (Kabir Oberai / Theos)
         run: |
@@ -56,10 +55,9 @@ jobs:
       - name: Build Rootless Package
         run: |
           make clean package \
+            THEOS=/home/runner/theos \
             THEOS_PACKAGE_SCHEME=rootless \
             FINALPACKAGE=1
-        env:
-          THEOS: /home/runner/theos
 
       - name: Upload Rootless .deb Artifact
         uses: actions/upload-artifact@v4
