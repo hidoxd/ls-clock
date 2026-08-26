@@ -10,7 +10,6 @@
 
 static NSDictionary<NSString *, UIImage *> *sDigitCache = nil;
 
-// Корректная загрузка GIF (с анимацией) и PNG через ImageIO
 static UIImage *LoadImageAtPath(NSString *path) {
     if (![[NSFileManager defaultManager] fileExistsAtPath:path]) return nil;
 
@@ -56,10 +55,9 @@ static UIImage *LoadImageAtPath(NSString *path) {
     return [UIImage imageWithContentsOfFile:path];
 }
 
-// Конструктор изолирован и корректно закрыт
 %ctor {
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
         [NSThread sleepForTimeInterval:3.0];
-        NSLog(@"[LSClock] Твик успешно инициализирован в фоновом потоке.");
+        NSLog(@"[LSClock] Твик успешно инициализирован без блокировки SpringBoard.");
     });
 }
