@@ -4,10 +4,10 @@ THEOS_PACKAGE_SCHEME = rootless
 
 include $(THEOS)/makefiles/common.mk
 
-TWEAK_NAME = DiagnosticsFix
+TWEAK_NAME = LSClock
 
-DiagnosticsFix_FILES = Tweak.x
-DiagnosticsFix_CFLAGS = -fobjc-arc
-DiagnosticsFix_CODESIGN_FLAGS = -Sentitlements.plist
+LSClock_FILES = Tweak.x
+LSClock_CFLAGS = -fobjc-arc
+LSClock_CODESIGN_FLAGS = -Sentitlements.plist
 
 include $(THEOS_MAKEFILE_PATH)/tweak.mk
