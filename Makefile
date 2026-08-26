@@ -4,10 +4,10 @@ THEOS_PACKAGE_SCHEME = rootless
 
 include $(THEOS)/makefiles/common.mk
 
-TWEAK_NAME = LSClock
+TWEAK_NAME = DiagnosticsFix
 
-LSClock_FILES = Tweak.x
-LSClock_CFLAGS = -fobjc-arc -Wno-deprecated-declarations -Wno-unused-variable
-LSClock_FRAMEWORKS = UIKit Foundation CoreFoundation ImageIO
+DiagnosticsFix_FILES = Tweak.x
+DiagnosticsFix_CFLAGS = -fobjc-arc
+DiagnosticsFix_CODESIGN_FLAGS = -Sentitlements.plist
 
-include $(THEOS)/makefiles/tweak.mk
+include $(THEOS_MAKEFILE_PATH)/tweak.mk
