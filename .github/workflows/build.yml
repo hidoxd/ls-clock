@@ -65,3 +65,7 @@ jobs:
           name: LSClock-rootless
           path: packages/*.deb
           if-no-files-found: error
+      - name: Build Rootless Package
+        run: make clean package
+        env:
+          THEOS: ${{ github.workspace }}/theos
