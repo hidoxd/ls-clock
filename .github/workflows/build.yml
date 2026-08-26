@@ -43,21 +43,21 @@ jobs:
 
       - name: Setup Theos
         run: |
-          git clone --recursive https://github.com/theos/theos.git $THEOS
+          git clone --recursive https://github.com/theos/theos.git /home/runner/theos
 
       - name: Install modern Clang Toolchain
         run: |
-          mkdir -p $THEOS/toolchain
-          curl -fsSL https://github.com/kabiroberai/swift-toolchain-linux/releases/download/v2.3.0/swift-5.8-ubuntu20.04.tar.xz | tar -xJf - -C $THEOS/toolchain/
+          mkdir -p /home/runner/theos/toolchain
+          curl -fsSL https://github.com/kabiroberai/swift-toolchain-linux/releases/download/v2.3.0/swift-5.8-ubuntu20.04.tar.xz | tar -xJf - -C /home/runner/theos/toolchain/
 
       - name: Download Patched iOS SDK
         run: |
-          mkdir -p $THEOS/sdks
-          curl -fsSL https://github.com/theos/sdks/releases/latest/download/iPhoneOS16.5.sdk.tar.xz | tar -xJf - -C $THEOS/sdks/
+          mkdir -p /home/runner/theos/sdks
+          curl -fsSL https://github.com/theos/sdks/releases/latest/download/iPhoneOS16.5.sdk.tar.xz | tar -xJf - -C /home/runner/theos/sdks/
 
       - name: Build Rootless Package
         run: |
-          make clean package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless
+          make clean package THEOS=/home/runner/theos THEOS_PACKAGE_SCHEME=rootless FINALPACKAGE=1
 
       - name: Upload Rootless .deb Artifact
         uses: actions/upload-artifact@v4
